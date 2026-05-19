@@ -13,6 +13,11 @@ from dotenv import load_dotenv
 from db.schema import init_db
 from commands.setup    import register_setup
 from commands.register import register_register
+from commands.track    import register_track
+from commands.lookup   import register_lookup
+from commands.add      import register_add
+from commands.league   import register_league
+from commands.admin    import register_admin
 from admin.dashboard   import start_admin_dashboard
 
 # ------------------------------------------------------------------
@@ -126,18 +131,15 @@ async def on_app_command_error(
 
 
 # ------------------------------------------------------------------
-# REGISTER COMMANDS
+# REGISTER ALL COMMANDS
 # ------------------------------------------------------------------
 register_setup(bot.tree)
 register_register(bot.tree)
-
-# Uncomment as each module is built:
-# from commands.track  import register_track;  register_track(bot.tree)
-# from commands.lookup import register_lookup; register_lookup(bot.tree)
-# from commands.league import register_league; register_league(bot.tree)
-# from commands.add    import register_add;    register_add(bot.tree)
-# from commands.admin  import register_admin;  register_admin(bot.tree)
-# from commands.whois  import register_whois;  register_whois(bot.tree)
+register_track(bot.tree)
+register_lookup(bot.tree)
+register_add(bot.tree)
+register_league(bot.tree)
+register_admin(bot.tree)
 
 # ------------------------------------------------------------------
 # INIT + RUN
