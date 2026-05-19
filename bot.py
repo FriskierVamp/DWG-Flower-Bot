@@ -5,14 +5,15 @@ Dreamweaving Garden Bot — Entry point
 
 import os
 import logging
-import threading
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 from db.schema import init_db
 from commands.setup    import register_setup
 from commands.register import register_register
+from admin.dashboard   import start_admin_dashboard
 
 # ------------------------------------------------------------------
 # ENV + LOGGING
@@ -34,13 +35,13 @@ log = logging.getLogger("dwg")
 # BOT SETUP
 # ------------------------------------------------------------------
 intents = discord.Intents.default()
-intents.members = True          # needed for role management
-intents.message_content = True  # needed if we ever read message content
+intents.members         = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------------------------------------------------------
-# STYLE CONSTANTS (shared across commands)
+# STYLE CONSTANTS
 # ------------------------------------------------------------------
 DWG_PURPLE = discord.Color(0xC9A0FF)
 DWG_MINT   = discord.Color(0xB8F2D0)
@@ -59,8 +60,6 @@ DIVIDER    = "━━━━━━━━━━━━━━━━━━━"
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     log.info("Connected to %d server(s)", len(bot.guilds))
-
-    # Sync slash commands globally
     try:
         synced = await bot.tree.sync()
         log.info("Synced %d slash command(s)", len(synced))
@@ -77,9 +76,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """
-    When the bot joins a new server, DM the owner with setup instructions.
-    """
     log.info("Joined new server: %s (ID: %s)", guild.name, guild.id)
     try:
         owner = guild.owner
@@ -88,8 +84,8 @@ async def on_guild_join(guild: discord.Guild):
                 title="🌸 Thanks for adding Dreamweaving Garden!",
                 description=(
                     f"Hello! I've just joined **{guild.name}**.\n\n"
-                    "Before your members can use any commands, a server admin needs to "
-                    "complete the one-time setup.\n\n"
+                    "Before your members can use any commands, a server admin "
+                    "needs to complete the one-time setup.\n\n"
                     "**To get started:**\n"
                     "1. Go to your server\n"
                     "2. Run the `/setup` command\n"
@@ -99,15 +95,14 @@ async def on_guild_join(guild: discord.Guild):
                     "• The role players get after `/register`\n"
                     "• Which role(s) have leader permissions\n"
                     "• The channel for public log posts\n\n"
-                    "Once setup is complete, your members can use `/register` to join "
-                    "and start tracking flowers, vases, league standings, and contributions.\n\n"
+                    "Once setup is complete, members can use `/register` to join.\n\n"
                     "Need help? Use `/help` inside your server at any time."
                 ),
                 color=DWG_PURPLE,
             )
             await owner.send(embed=embed)
     except discord.Forbidden:
-        log.warning("Could not DM owner of %s — DMs likely disabled.", guild.name)
+        log.warning("Could not DM owner of %s — DMs disabled.", guild.name)
     except Exception as e:
         log.error("on_guild_join error: %s", e)
 
@@ -120,11 +115,14 @@ async def on_app_command_error(
     log.error("Slash command error: %s", error)
     msg = "Something went wrong. Please try again."
     if isinstance(error, app_commands.CommandOnCooldown):
-        msg = f"You're doing that too fast. Try again in {error.retry_after:.1f}s."
-    if not interaction.response.is_done():
-        await interaction.response.send_message(msg, ephemeral=True)
-    else:
-        await interaction.followup.send(msg, ephemeral=True)
+        msg = f"Slow down! Try again in {error.retry_after:.1f}s."
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------
@@ -133,20 +131,17 @@ async def on_app_command_error(
 register_setup(bot.tree)
 register_register(bot.tree)
 
-# Placeholder imports — uncomment as each module is built:
-# from commands.track        import register_track
-# from commands.lookup       import register_lookup
-# from commands.league       import register_league
-# from commands.log_vision   import register_log
-# from commands.add_manual   import register_add
-# from commands.admin        import register_admin
-# from commands.whois        import register_whois
-
-from admin.dashboard import start_admin_dashboard
-start_admin_dashboard()
+# Uncomment as each module is built:
+# from commands.track  import register_track;  register_track(bot.tree)
+# from commands.lookup import register_lookup; register_lookup(bot.tree)
+# from commands.league import register_league; register_league(bot.tree)
+# from commands.add    import register_add;    register_add(bot.tree)
+# from commands.admin  import register_admin;  register_admin(bot.tree)
+# from commands.whois  import register_whois;  register_whois(bot.tree)
 
 # ------------------------------------------------------------------
 # INIT + RUN
 # ------------------------------------------------------------------
 init_db()
+start_admin_dashboard()
 bot.run(TOKEN)
