@@ -48,12 +48,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ------------------------------------------------------------------
 # STYLE CONSTANTS
 # ------------------------------------------------------------------
-DWG_PURPLE = discord.Color(0xC9A0FF)
-DWG_MINT   = discord.Color(0xB8F2D0)
-DWG_YELLOW = discord.Color(0xFFE5A3)
-DWG_PINK   = discord.Color(0xFFB3C1)
-DWG_BLUE   = discord.Color(0xBFD7FF)
-DWG_GOLD   = discord.Color(0xF4D58D)
+DWG_PURPLE = discord.Color(0xF0A8C0)
+DWG_MINT   = discord.Color(0xB8D9B0)
+DWG_YELLOW = discord.Color(0xF7C898)
+DWG_PINK   = discord.Color(0xF7CCD8)
+DWG_BLUE   = discord.Color(0xB8D8F0)
+DWG_GOLD   = discord.Color(0xE8C878)
 FOOTER     = "Dreamweaving Garden • Grow together, bloom brighter"
 DIVIDER    = "━━━━━━━━━━━━━━━━━━━"
 

@@ -1,8 +1,7 @@
 """
 admin/dashboard.py
 Dreamweaving Garden Bot — Flask admin dashboard
-Flower master list management with DWG-specific fields.
-Runs in a daemon thread alongside the Discord bot.
+Rethemed to match DWG artwork: soft pastels, warm cream, cozy garden aesthetic.
 """
 
 import os
@@ -31,14 +30,13 @@ ADMIN_PORT   = int(os.getenv("ADMIN_PORT", 5000))
 
 
 # ------------------------------------------------------------------
-# AUTH — session based login
+# AUTH — session based
 # ------------------------------------------------------------------
 
 def require_login(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("logged_in"):
-            # API calls return JSON 401; page calls redirect to login
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Unauthorized"}), 401
             return redirect(url_for("login"))
@@ -54,7 +52,6 @@ def require_login(f):
 @require_login
 def api_get_flowers():
     flowers = get_all_flowers()
-    # Sort by rarity order then name
     flowers.sort(key=lambda f: (
         RARITY_ORDER.get(normalize_rarity(f["rarity"]), 99),
         f["name"].lower()
@@ -83,7 +80,6 @@ def api_add_flower():
         return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
 
     upsert_flower(name, rarity, base_points, upgrade_cost, source)
-    log.info("Flower upserted: %s (%s, %d pts, %d💎)", name, rarity, base_points, upgrade_cost)
     return jsonify({"status": "ok", "name": name})
 
 
@@ -102,7 +98,7 @@ def api_update_flower(name: str):
     source       = str(data.get("source",   existing["source"])).strip()
 
     if normalize_rarity(rarity) not in VALID_RARITIES:
-        return jsonify({"error": f"Invalid rarity."}), 400
+        return jsonify({"error": "Invalid rarity."}), 400
     try:
         base_points  = int(base_points)
         upgrade_cost = int(upgrade_cost)
@@ -110,18 +106,15 @@ def api_update_flower(name: str):
         return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
 
     upsert_flower(name, rarity, base_points, upgrade_cost, source)
-    log.info("Flower updated: %s", name)
     return jsonify({"status": "ok", "name": name})
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["DELETE"])
 @require_login
 def api_delete_flower(name: str):
-    from db.queries import delete_flower as df
-    deleted = df(name)
+    deleted = delete_flower(name)
     if not deleted:
         return jsonify({"error": f'Flower "{name}" not found.'}), 404
-    log.info("Flower deleted: %s", name)
     return jsonify({"status": "ok", "name": name})
 
 
@@ -133,246 +126,479 @@ def api_rarities():
 
 
 # ------------------------------------------------------------------
-# DASHBOARD HTML
+# LOGIN PAGE
+# ------------------------------------------------------------------
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Dreamweaving Garden · Sign In</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;1,500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --cream:     #fdf6ee;
+  --parchment: #f5ede0;
+  --pink:      #f0a8c0;
+  --pink-soft: #fce4ec;
+  --pink-mid:  #f7ccd8;
+  --lavender:  #d8bef0;
+  --lav-soft:  #ede8f8;
+  --mint:      #b8d9b0;
+  --mint-soft: #dff0db;
+  --sky:       #b8d8f0;
+  --sky-soft:  #e0f0fc;
+  --wood:      #c8905a;
+  --text:      #4a3020;
+  --text2:     #7a5c40;
+  --text3:     #b09070;
+  --border:    #f0d8c8;
+  --white:     #fffaf5;
+  --font-d:    'Playfair Display',Georgia,serif;
+  --font-b:    'DM Sans',system-ui,sans-serif;
+  --r:         16px;
+}
+body{
+  font-family:var(--font-b);
+  min-height:100vh;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--cream);
+  background-image:
+    radial-gradient(ellipse at 15% 15%, rgba(240,168,192,.25) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 85%, rgba(184,217,176,.25) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 10%, rgba(216,190,240,.2)  0%, transparent 40%);
+}
+
+/* floating petals */
+.petal{position:fixed;pointer-events:none;font-size:1.2rem;opacity:0;
+  animation:fall linear infinite}
+@keyframes fall{
+  0%  {transform:translateY(-20px) rotate(0deg);  opacity:.7}
+  100%{transform:translateY(110vh) rotate(360deg);opacity:0}
+}
+
+.wrap{
+  width:100%;max-width:440px;padding:16px;
+  display:flex;flex-direction:column;align-items:center;gap:24px;
+}
+
+/* banner image area */
+.banner-art{
+  width:100%;border-radius:20px;overflow:hidden;
+  box-shadow:0 8px 32px rgba(180,120,100,.18);
+  border:3px solid var(--pink-mid);
+  aspect-ratio:3/1;
+  background:linear-gradient(135deg,#fce4ec,#e8f5e9,#e3f2fd);
+  display:flex;align-items:center;justify-content:center;
+  font-size:2.5rem;letter-spacing:.2em;
+}
+
+.card{
+  width:100%;
+  background:var(--white);
+  border:2px solid var(--pink-mid);
+  border-radius:var(--r);
+  padding:40px 36px 32px;
+  box-shadow:0 4px 24px rgba(180,120,100,.12), 0 1px 4px rgba(180,120,100,.08);
+  position:relative;overflow:hidden;
+}
+.card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:4px;
+  background:linear-gradient(90deg,var(--pink),var(--lavender),var(--mint),var(--sky));
+  border-radius:var(--r) var(--r) 0 0;
+}
+.card::after{
+  content:'🌸';position:absolute;top:12px;right:16px;font-size:1.4rem;opacity:.35;
+}
+
+.logo{
+  font-family:var(--font-d);font-size:1.65rem;font-weight:700;
+  color:var(--text);text-align:center;line-height:1.2;margin-bottom:4px;
+}
+.logo span{color:var(--pink);}
+.tagline{
+  text-align:center;font-size:.78rem;color:var(--text3);
+  letter-spacing:.1em;text-transform:uppercase;margin-bottom:32px;
+}
+
+.field-wrap{margin-bottom:20px}
+label{
+  display:block;font-size:.72rem;font-weight:500;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--text2);margin-bottom:8px;
+}
+input[type=password]{
+  width:100%;background:var(--parchment);
+  border:1.5px solid var(--border);border-radius:10px;
+  padding:13px 16px;font-size:.95rem;color:var(--text);
+  font-family:var(--font-b);outline:none;
+  transition:border-color .2s,box-shadow .2s;
+}
+input[type=password]:focus{
+  border-color:var(--pink);
+  box-shadow:0 0 0 3px rgba(240,168,192,.2);
+  background:var(--white);
+}
+
+button{
+  width:100%;padding:13px;border:none;border-radius:10px;
+  background:linear-gradient(135deg,var(--pink),#e898b8);
+  color:var(--white);font-size:.95rem;font-weight:600;
+  font-family:var(--font-b);cursor:pointer;
+  box-shadow:0 3px 12px rgba(240,168,192,.4);
+  transition:opacity .15s,transform .12s,box-shadow .15s;
+}
+button:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 5px 16px rgba(240,168,192,.5)}
+button:active{transform:none}
+
+.error{
+  margin-top:14px;padding:11px 14px;border-radius:9px;
+  font-size:.84rem;text-align:center;
+  background:#fdf0f3;color:#c05070;
+  border:1.5px solid #f5c0cc;
+}
+
+.flowers-row{
+  display:flex;justify-content:center;gap:8px;
+  font-size:1.3rem;opacity:.5;margin-top:4px;
+}
+.note{text-align:center;font-size:.73rem;color:var(--text3);margin-top:20px}
+</style>
+</head>
+<body>
+
+<!-- floating petals -->
+<div class="petal" style="left:8%;animation-duration:7s;animation-delay:0s">🌸</div>
+<div class="petal" style="left:22%;animation-duration:9s;animation-delay:2s">🌼</div>
+<div class="petal" style="left:55%;animation-duration:8s;animation-delay:1s">🌸</div>
+<div class="petal" style="left:72%;animation-duration:11s;animation-delay:3s">🌷</div>
+<div class="petal" style="left:88%;animation-duration:7.5s;animation-delay:.5s">🌸</div>
+
+<div class="wrap">
+  <div class="banner-art">🌸 🌷 🌿 🌼 🌸</div>
+
+  <div class="card">
+    <div class="logo">Dreamweaving <span>Garden</span></div>
+    <div class="tagline">✦ Flower Manager · Admin ✦</div>
+
+    <form method="POST" action="/login">
+      <div class="field-wrap">
+        <label for="password">Admin Password</label>
+        <input type="password" id="password" name="password"
+               placeholder="Enter your password…"
+               autofocus autocomplete="current-password"/>
+      </div>
+      {% if error %}
+      <div class="error">🌺 {{ error }}</div>
+      {% endif %}
+      <button type="submit">Sign In to Garden ✦</button>
+    </form>
+
+    <div class="flowers-row">🌸 🌼 🌷 🌿 🌸</div>
+    <div class="note">Dreamweaving Garden • Grow together, bloom brighter</div>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+# ------------------------------------------------------------------
+# DASHBOARD HTML — full pastel retheme
 # ------------------------------------------------------------------
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>DWG · Flower Manager</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;1,500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0e0b14;
-  --surface:#18132a;
-  --surface2:#211a38;
-  --border:#2e2450;
-  --accent:#c9a0ff;
-  --accent2:#b8f2d0;
-  --accent3:#ffb3c1;
-  --gold:#f4d58d;
-  --text:#e8e0f5;
-  --text2:#9f93c0;
-  --text3:#5e5480;
-  --shine:#fff8e7;
-  --star:#c9a0ff;
-  --rare:#7dd4fc;
-  --fine:#b8f2d0;
-  --basic:#9f93c0;
-  --danger:#ff6b8a;
-  --success:#6ee7b7;
-  --font-display:'Playfair Display',Georgia,serif;
-  --font-body:'DM Sans',system-ui,sans-serif;
-  --radius:12px;
-  --radius-sm:8px;
+  --cream:      #fdf6ee;
+  --parchment:  #f5ede0;
+  --parchment2: #ede0d0;
+  --white:      #fffaf5;
+  --pink:       #f0a8c0;
+  --pink-soft:  #fce4ec;
+  --pink-mid:   #f7ccd8;
+  --pink-deep:  #e07898;
+  --lav:        #d0aee8;
+  --lav-soft:   #ede8f8;
+  --mint:       #9ecf98;
+  --mint-soft:  #dff0db;
+  --sky:        #98c8e8;
+  --sky-soft:   #daeef8;
+  --peach:      #f7c898;
+  --peach-soft: #fdeede;
+  --wood:       #c8905a;
+  --wood-soft:  #f0dcc8;
+  --text:       #4a3020;
+  --text2:      #7a5c40;
+  --text3:      #b09878;
+  --border:     #f0d8c8;
+  --border2:    #e8c8b8;
+  --shine-c:    #e8b830;
+  --star-c:     #c080e0;
+  --rare-c:     #60a8e0;
+  --fine-c:     #68b880;
+  --basic-c:    #a09878;
+  --font-d:     'Playfair Display',Georgia,serif;
+  --font-b:     'DM Sans',system-ui,sans-serif;
+  --r:          14px;
+  --r-sm:       9px;
 }
 html{font-size:15px}
-body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-height:100vh;
-  background-image:radial-gradient(ellipse at 20% 0%,rgba(100,60,180,.18) 0%,transparent 60%),
-                   radial-gradient(ellipse at 80% 100%,rgba(184,242,208,.08) 0%,transparent 50%);
+body{
+  background:var(--cream);color:var(--text);font-family:var(--font-b);min-height:100vh;
+  background-image:
+    radial-gradient(ellipse at 0% 0%,   rgba(240,168,192,.15) 0%,transparent 45%),
+    radial-gradient(ellipse at 100% 100%,rgba(158,207,152,.15) 0%,transparent 45%),
+    radial-gradient(ellipse at 100% 0%,  rgba(208,174,232,.12) 0%,transparent 40%);
 }
 
 /* ── LAYOUT ── */
 .shell{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{background:var(--surface);border-right:1px solid var(--border);
-  padding:32px 24px;display:flex;flex-direction:column;gap:8px;position:sticky;top:0;height:100vh}
-.main{padding:40px 48px;overflow-y:auto}
+.sidebar{
+  background:var(--white);border-right:1.5px solid var(--border);
+  padding:28px 20px;display:flex;flex-direction:column;gap:8px;
+  position:sticky;top:0;height:100vh;overflow-y:auto;
+}
+.main{padding:36px 44px;overflow-y:auto}
 
 /* ── SIDEBAR ── */
-.logo{font-family:var(--font-display);font-size:1.35rem;font-weight:700;
-  color:var(--accent);letter-spacing:.02em;margin-bottom:8px;line-height:1.2}
-.logo span{display:block;font-size:.75rem;font-weight:400;color:var(--text3);
-  font-family:var(--font-body);letter-spacing:.08em;text-transform:uppercase;margin-top:4px}
-.sidebar-divider{height:1px;background:var(--border);margin:16px 0}
-.sidebar-label{font-size:.68rem;font-weight:500;letter-spacing:.12em;
-  text-transform:uppercase;color:var(--text3);padding:0 4px;margin-bottom:4px}
-.stat-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);
-  padding:12px 14px;margin-bottom:8px}
-.stat-card .val{font-family:var(--font-display);font-size:1.6rem;font-weight:600;color:var(--accent)}
-.stat-card .lbl{font-size:.75rem;color:var(--text2);margin-top:2px}
-.rarity-pills{display:flex;flex-direction:column;gap:6px;margin-top:4px}
-.rpill{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;
-  border-radius:6px;font-size:.8rem;font-weight:500;cursor:pointer;border:none;
-  transition:opacity .15s,transform .1s;text-align:left}
-.rpill:hover{opacity:.85;transform:translateX(2px)}
-.rpill.all{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
-.rpill.shine{background:rgba(255,248,231,.12);color:var(--shine);border:1px solid rgba(255,248,231,.2)}
-.rpill.star{background:rgba(201,160,255,.12);color:var(--star);border:1px solid rgba(201,160,255,.2)}
-.rpill.rare{background:rgba(125,212,252,.12);color:var(--rare);border:1px solid rgba(125,212,252,.2)}
-.rpill.fine{background:rgba(184,242,208,.12);color:var(--fine);border:1px solid rgba(184,242,208,.2)}
-.rpill.basic{background:rgba(159,147,192,.12);color:var(--basic);border:1px solid rgba(159,147,192,.2)}
-.rpill .count{font-size:.72rem;opacity:.7;margin-left:auto;padding-left:8px}
-.rpill.active{outline:2px solid currentColor;outline-offset:-2px}
+.logo{
+  font-family:var(--font-d);font-size:1.25rem;font-weight:700;
+  color:var(--text);line-height:1.25;margin-bottom:4px;
+}
+.logo .accent{color:var(--pink-deep)}
+.logo-sub{font-size:.7rem;color:var(--text3);letter-spacing:.1em;
+  text-transform:uppercase;margin-bottom:4px;font-family:var(--font-b)}
+.logo-divider{height:1.5px;background:linear-gradient(90deg,var(--pink-mid),var(--lav-soft),var(--mint-soft));
+  border-radius:2px;margin:12px 0}
+
+.stat-card{
+  background:var(--parchment);border:1.5px solid var(--border);
+  border-radius:var(--r-sm);padding:12px 14px;margin-bottom:6px;
+}
+.stat-card .val{font-family:var(--font-d);font-size:1.7rem;font-weight:600;color:var(--pink-deep)}
+.stat-card .lbl{font-size:.73rem;color:var(--text2);margin-top:1px}
+
+.sidebar-label{font-size:.67rem;font-weight:500;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--text3);padding:0 4px;margin-bottom:4px;margin-top:6px}
+
+.rarity-pills{display:flex;flex-direction:column;gap:5px;margin-bottom:8px}
+.rpill{display:flex;align-items:center;padding:8px 12px;border-radius:var(--r-sm);
+  font-size:.8rem;font-weight:500;cursor:pointer;border:1.5px solid transparent;
+  transition:all .15s;text-align:left;background:var(--parchment);color:var(--text2)}
+.rpill:hover{transform:translateX(2px);border-color:var(--border2)}
+.rpill.all{background:var(--pink-soft);color:var(--pink-deep);border-color:var(--pink-mid)}
+.rpill.Shine{background:#fef9e7;color:#b8860b;border-color:#f0d070}
+.rpill.Star{background:#f5eeff;color:#8040c0;border-color:#d0a8f0}
+.rpill.Rare{background:#eaf4fd;color:#2878b0;border-color:#90c8f0}
+.rpill.Fine{background:#edfaed;color:#287828;border-color:#80c880}
+.rpill.Basic{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
+.rpill.active{font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.rpill .count{font-size:.7rem;margin-left:auto;opacity:.65}
+
+.signout{
+  display:block;padding:9px 14px;border-radius:var(--r-sm);margin-top:auto;
+  background:var(--pink-soft);color:var(--pink-deep);border:1.5px solid var(--pink-mid);
+  font-size:.8rem;font-weight:500;text-decoration:none;text-align:center;
+  transition:all .15s;
+}
+.signout:hover{background:var(--pink-mid);transform:translateY(-1px)}
 
 /* ── HEADER ── */
-.page-header{display:flex;align-items:flex-start;justify-content:space-between;
-  margin-bottom:36px;gap:24px;flex-wrap:wrap}
-.page-title{font-family:var(--font-display);font-size:2rem;font-weight:700;
-  color:var(--text);line-height:1.15}
-.page-title small{display:block;font-size:.85rem;font-family:var(--font-body);
-  font-weight:400;color:var(--text2);margin-top:6px;letter-spacing:.01em}
+.banner{
+  width:100%;border-radius:18px;overflow:hidden;margin-bottom:28px;
+  border:2px solid var(--pink-mid);
+  background:linear-gradient(135deg,var(--pink-soft),var(--lav-soft),var(--mint-soft),var(--sky-soft));
+  padding:22px 32px;position:relative;
+}
+.banner::after{content:'🌸 🌼 🌷 🌿 🌸';position:absolute;right:24px;top:50%;
+  transform:translateY(-50%);font-size:1.4rem;opacity:.4;letter-spacing:.3em}
+.banner-title{font-family:var(--font-d);font-size:1.7rem;font-weight:700;color:var(--text)}
+.banner-sub{font-size:.83rem;color:var(--text2);margin-top:5px}
 
-/* ── FORM PANEL ── */
-.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-  padding:28px 28px 24px;margin-bottom:32px;position:relative;overflow:hidden}
-.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,var(--accent),var(--accent2),var(--gold))}
-.panel-title{font-family:var(--font-display);font-size:1.1rem;font-weight:600;
-  margin-bottom:20px;color:var(--accent)}
-.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;
-  gap:14px;align-items:end}
-.field label{display:block;font-size:.72rem;font-weight:500;letter-spacing:.09em;
-  text-transform:uppercase;color:var(--text2);margin-bottom:7px}
-.field input,.field select{width:100%;background:var(--surface2);border:1px solid var(--border);
-  border-radius:var(--radius-sm);padding:10px 13px;font-size:.9rem;color:var(--text);
-  font-family:var(--font-body);transition:border-color .15s,box-shadow .15s;outline:none}
-.field input:focus,.field select:focus{border-color:var(--accent);
-  box-shadow:0 0 0 3px rgba(201,160,255,.15)}
-.field input::placeholder{color:var(--text3)}
-.field select option{background:var(--surface2)}
-.calc-display{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);
-  padding:10px 13px;font-size:.9rem;color:var(--text3);min-height:42px;
-  display:flex;align-items:center;gap:6px}
-.calc-display .val{color:var(--gold);font-weight:500}
-
-/* ── BUTTONS ── */
-.btn{padding:10px 18px;border:none;border-radius:var(--radius-sm);cursor:pointer;
-  font-size:.85rem;font-weight:500;font-family:var(--font-body);
-  transition:opacity .15s,transform .1s;white-space:nowrap}
-.btn:hover{opacity:.88;transform:translateY(-1px)}
-.btn:active{transform:translateY(0)}
-.btn-primary{background:var(--accent);color:#0e0b14}
-.btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
-.btn-danger{background:rgba(255,107,138,.15);color:var(--danger);border:1px solid rgba(255,107,138,.3)}
-.btn-success{background:rgba(110,231,183,.15);color:var(--success);border:1px solid rgba(110,231,183,.3)}
-.btn-sm{padding:6px 12px;font-size:.78rem}
-.btn-group{display:flex;gap:8px;align-items:center;padding-bottom:1px}
-
-/* ── STATUS BAR ── */
-.status-bar{min-height:40px;margin-bottom:16px}
+/* ── STATUS ── */
+.status-bar{min-height:40px;margin-bottom:14px}
 .toast{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;
-  border-radius:var(--radius-sm);font-size:.85rem;animation:fadeIn .2s ease}
-.toast.ok{background:rgba(110,231,183,.12);color:var(--success);border:1px solid rgba(110,231,183,.25)}
-.toast.err{background:rgba(255,107,138,.12);color:var(--danger);border:1px solid rgba(255,107,138,.25)}
+  border-radius:var(--r-sm);font-size:.84rem;animation:fadeIn .2s ease}
+.toast.ok{background:var(--mint-soft);color:#287828;border:1.5px solid #b0d8b0}
+.toast.err{background:var(--pink-soft);color:var(--pink-deep);border:1.5px solid var(--pink-mid)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
 
+/* ── PANEL ── */
+.panel{
+  background:var(--white);border:1.5px solid var(--border);
+  border-radius:var(--r);padding:26px 28px 22px;margin-bottom:28px;
+  box-shadow:0 2px 12px rgba(180,120,80,.07);
+}
+.panel-top{height:3px;margin:-26px -28px 22px;
+  background:linear-gradient(90deg,var(--pink),var(--lav),var(--mint),var(--sky));
+  border-radius:var(--r) var(--r) 0 0}
+.panel-title{font-family:var(--font-d);font-size:1.05rem;font-weight:600;
+  color:var(--text);margin-bottom:18px}
+
+.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;gap:13px;align-items:end}
+.field label{display:block;font-size:.7rem;font-weight:500;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--text2);margin-bottom:6px}
+.field input,.field select{
+  width:100%;background:var(--parchment);border:1.5px solid var(--border);
+  border-radius:var(--r-sm);padding:10px 13px;font-size:.88rem;color:var(--text);
+  font-family:var(--font-b);transition:border-color .15s,box-shadow .15s;outline:none;
+}
+.field input:focus,.field select:focus{
+  border-color:var(--pink);background:var(--white);
+  box-shadow:0 0 0 3px rgba(240,168,192,.2);
+}
+.field input::placeholder{color:var(--text3)}
+.field select option{background:var(--white)}
+.calc-row{display:flex;align-items:center;gap:10px;margin-top:12px}
+.calc-label{font-size:.75rem;color:var(--text2)}
+.calc-pill{background:var(--peach-soft);border:1.5px solid var(--peach);color:var(--wood);
+  border-radius:999px;padding:4px 14px;font-size:.82rem;font-weight:500}
+
+/* ── BUTTONS ── */
+.btn{padding:10px 18px;border:1.5px solid transparent;border-radius:var(--r-sm);
+  cursor:pointer;font-size:.83rem;font-weight:500;font-family:var(--font-b);
+  transition:all .15s;white-space:nowrap}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:none}
+.btn-primary{background:linear-gradient(135deg,var(--pink),#e898b8);color:var(--white);
+  box-shadow:0 2px 8px rgba(240,168,192,.35);border-color:transparent}
+.btn-secondary{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
+.btn-danger{background:var(--pink-soft);color:var(--pink-deep);border-color:var(--pink-mid)}
+.btn-success{background:var(--mint-soft);color:#287828;border-color:#90c890}
+.btn-sm{padding:6px 12px;font-size:.76rem}
+.btn-group{display:flex;gap:8px;align-items:center}
+
 /* ── TOOLBAR ── */
-.toolbar{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.toolbar{display:flex;align-items:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
 .search-wrap{position:relative;flex:1;min-width:200px}
 .search-wrap input{width:100%;padding-left:36px}
 .search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);
-  color:var(--text3);font-size:1rem;pointer-events:none}
-.count-badge{font-size:.78rem;color:var(--text2);white-space:nowrap}
+  color:var(--text3);pointer-events:none}
+.count-badge{font-size:.77rem;color:var(--text2)}
 
 /* ── TABLE ── */
-.table-wrap{border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-table{width:100%;border-collapse:collapse}
-thead th{background:var(--surface2);padding:12px 16px;text-align:left;
-  font-size:.72rem;font-weight:500;letter-spacing:.09em;text-transform:uppercase;
-  color:var(--text2);border-bottom:1px solid var(--border);white-space:nowrap}
+.table-wrap{
+  border:1.5px solid var(--border);border-radius:var(--r);overflow:hidden;
+  box-shadow:0 2px 12px rgba(180,120,80,.06);
+}
+table{width:100%;border-collapse:collapse;background:var(--white)}
+thead th{
+  background:var(--parchment);padding:11px 16px;text-align:left;
+  font-size:.7rem;font-weight:500;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--text2);border-bottom:1.5px solid var(--border);white-space:nowrap;
+}
 tbody tr{border-bottom:1px solid var(--border);transition:background .12s}
 tbody tr:last-child{border-bottom:none}
-tbody tr:hover{background:var(--surface2)}
-tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
-.flower-name{font-weight:500;color:var(--text)}
-.rarity-badge{display:inline-block;padding:3px 10px;border-radius:999px;
-  font-size:.72rem;font-weight:500;letter-spacing:.04em;white-space:nowrap}
-.rarity-badge.Shine{background:rgba(255,248,231,.15);color:var(--shine);border:1px solid rgba(255,248,231,.3)}
-.rarity-badge.Star{background:rgba(201,160,255,.15);color:var(--star);border:1px solid rgba(201,160,255,.3)}
-.rarity-badge.Rare{background:rgba(125,212,252,.15);color:var(--rare);border:1px solid rgba(125,212,252,.3)}
-.rarity-badge.Fine{background:rgba(184,242,208,.15);color:var(--fine);border:1px solid rgba(184,242,208,.3)}
-.rarity-badge.Basic{background:rgba(159,147,192,.15);color:var(--basic);border:1px solid rgba(159,147,192,.3)}
-.pts{font-weight:500}
-.pts.base{color:var(--text)}
-.pts.upgraded{color:var(--gold)}
-.diamond{color:#7dd4fc;font-size:.85em}
-.source-tag{font-size:.78rem;color:var(--text2)}
-.actions{display:flex;gap:6px}
-.empty-state{padding:60px 20px;text-align:center;color:var(--text3)}
-.empty-state .icon{font-size:2.5rem;margin-bottom:12px;opacity:.4}
-.empty-state p{font-size:.9rem}
+tbody tr:hover{background:var(--parchment)}
+tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 
-/* ── EDIT ROW ── */
+.flower-name{font-weight:500;color:var(--text)}
+.rarity-badge{display:inline-block;padding:3px 11px;border-radius:999px;
+  font-size:.7rem;font-weight:600;letter-spacing:.04em;border:1.5px solid transparent}
+.rarity-badge.Shine{background:#fef9e7;color:#b8860b;border-color:#f0d070}
+.rarity-badge.Star{background:#f5eeff;color:#8040c0;border-color:#d0a8f0}
+.rarity-badge.Rare{background:#eaf4fd;color:#2878b0;border-color:#90c8f0}
+.rarity-badge.Fine{background:#edfaed;color:#287828;border-color:#80c880}
+.rarity-badge.Basic{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
+
+.pts-base{font-weight:500;color:var(--text)}
+.pts-up{font-weight:600;color:var(--wood)}
+.diamond{color:var(--sky);font-size:.85em}
+.source-tag{font-size:.77rem;color:var(--text2)}
+.actions{display:flex;gap:6px}
+
+.empty-state{padding:56px 20px;text-align:center;color:var(--text3)}
+.empty-state .icon{font-size:2.5rem;margin-bottom:10px;opacity:.5}
+.empty-state p{font-size:.88rem}
+
+/* ── INLINE EDIT ── */
 .edit-row{display:none}
 .edit-row.open{display:table-row}
-.edit-row td{background:var(--surface2);padding:16px;border-bottom:1px solid var(--border)}
-.edit-form{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;
-  gap:12px;align-items:end}
+.edit-row td{background:var(--parchment);padding:16px;border-bottom:1.5px solid var(--border)}
+.edit-form{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;gap:12px;align-items:end}
 
-/* ── MODAL (confirm delete) ── */
-.modal-overlay{position:fixed;inset:0;background:rgba(14,11,20,.8);
+/* ── DELETE MODAL ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(74,48,32,.35);backdrop-filter:blur(2px);
   display:flex;align-items:center;justify-content:center;z-index:100;
   opacity:0;pointer-events:none;transition:opacity .2s}
 .modal-overlay.open{opacity:1;pointer-events:all}
-.modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-  padding:32px;max-width:400px;width:90%;transform:translateY(8px);transition:transform .2s}
+.modal{background:var(--white);border:2px solid var(--pink-mid);border-radius:var(--r);
+  padding:32px;max-width:400px;width:90%;
+  transform:translateY(8px);transition:transform .2s;
+  box-shadow:0 8px 32px rgba(180,120,80,.15)}
 .modal-overlay.open .modal{transform:none}
-.modal h3{font-family:var(--font-display);font-size:1.2rem;margin-bottom:12px;color:var(--accent3)}
-.modal p{font-size:.9rem;color:var(--text2);margin-bottom:24px;line-height:1.6}
+.modal h3{font-family:var(--font-d);font-size:1.2rem;margin-bottom:10px;color:var(--pink-deep)}
+.modal p{font-size:.88rem;color:var(--text2);margin-bottom:24px;line-height:1.6}
 .modal .btn-group{justify-content:flex-end}
 
 @media(max-width:900px){
   .shell{grid-template-columns:1fr}
   .sidebar{position:static;height:auto}
-  .main{padding:24px 20px}
+  .main{padding:24px 18px}
   .form-grid,.edit-form{grid-template-columns:1fr 1fr}
   .form-grid>:last-child,.edit-form>:last-child{grid-column:1/-1}
+  .banner::after{display:none}
 }
 </style>
 </head>
 <body>
-
 <div class="shell">
+
   <!-- SIDEBAR -->
   <aside class="sidebar">
-    <div class="logo">Dreamweaving Garden<span>Flower Manager</span></div>
-    <div class="sidebar-divider"></div>
+    <div class="logo">Dreamweaving <span class="accent">Garden</span></div>
+    <div class="logo-sub">✦ Flower Manager ✦</div>
+    <div class="logo-divider"></div>
+
     <div class="stat-card">
       <div class="val" id="sTotal">—</div>
-      <div class="lbl">Total flowers</div>
+      <div class="lbl">Flowers in master list</div>
     </div>
-    <div class="sidebar-divider"></div>
-    <a href="/logout" style="display:block;padding:9px 14px;border-radius:8px;
-      background:rgba(255,107,138,.1);color:#ff6b8a;border:1px solid rgba(255,107,138,.25);
-      font-size:.8rem;font-weight:500;text-decoration:none;text-align:center;
-      transition:opacity .15s" onmouseover="this.style.opacity=.8" onmouseout="this.style.opacity=1">
-      Sign Out
-    </a>
-    <div class="sidebar-divider"></div>
-    <div class="sidebar-label">Filter by rarity</div>
+
+    <div class="logo-divider"></div>
+    <div class="sidebar-label">Filter by Rarity</div>
     <div class="rarity-pills">
       <button class="rpill all active" onclick="setFilter('all',this)">
-        All flowers <span class="count" id="cnt-all"></span>
+        🌸 All Flowers <span class="count" id="cnt-all"></span>
       </button>
-      <button class="rpill shine" onclick="setFilter('Shine',this)">
+      <button class="rpill Shine" onclick="setFilter('Shine',this)">
         ✦ Shine <span class="count" id="cnt-Shine"></span>
       </button>
-      <button class="rpill star" onclick="setFilter('Star',this)">
+      <button class="rpill Star" onclick="setFilter('Star',this)">
         ★ Star <span class="count" id="cnt-Star"></span>
       </button>
-      <button class="rpill rare" onclick="setFilter('Rare',this)">
+      <button class="rpill Rare" onclick="setFilter('Rare',this)">
         ◆ Rare <span class="count" id="cnt-Rare"></span>
       </button>
-      <button class="rpill fine" onclick="setFilter('Fine',this)">
+      <button class="rpill Fine" onclick="setFilter('Fine',this)">
         ◇ Fine <span class="count" id="cnt-Fine"></span>
       </button>
-      <button class="rpill basic" onclick="setFilter('Basic',this)">
+      <button class="rpill Basic" onclick="setFilter('Basic',this)">
         · Basic <span class="count" id="cnt-Basic"></span>
       </button>
     </div>
+
+    <div class="logo-divider"></div>
+    <a href="/logout" class="signout">🌿 Sign Out</a>
   </aside>
 
   <!-- MAIN -->
   <main class="main">
-    <div class="page-header">
-      <div class="page-title">
-        Flower Master List
-        <small>Add, edit, and remove flowers for Dreamweaving Garden league.</small>
-      </div>
+
+    <!-- BANNER -->
+    <div class="banner">
+      <div class="banner-title">🌸 Flower Master List</div>
+      <div class="banner-sub">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
     </div>
 
     <!-- STATUS -->
@@ -380,7 +606,8 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
 
     <!-- ADD FORM -->
     <div class="panel">
-      <div class="panel-title" id="formTitle">Add New Flower</div>
+      <div class="panel-top"></div>
+      <div class="panel-title" id="formTitle">🌱 Add New Flower</div>
       <div class="form-grid">
         <div class="field">
           <label>Flower Name</label>
@@ -401,7 +628,7 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
           <input id="fPoints" type="number" min="0" placeholder="0" oninput="updateCalc()"/>
         </div>
         <div class="field">
-          <label>Upgrade Cost <span class="diamond">💎</span></label>
+          <label>Upgrade Cost 💎</label>
           <input id="fCost" type="number" min="0" placeholder="0"/>
         </div>
         <div class="field">
@@ -411,14 +638,14 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
         <div class="field">
           <label>&nbsp;</label>
           <div class="btn-group">
-            <button class="btn btn-primary" onclick="submitForm()">Add</button>
+            <button class="btn btn-primary" onclick="submitForm()">Add ✦</button>
             <button class="btn btn-secondary" id="btnCancel" onclick="cancelEdit()" style="display:none">Cancel</button>
           </div>
         </div>
       </div>
-      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
-        <span style="font-size:.78rem;color:var(--text2)">Upgraded points (×2):</span>
-        <span class="calc-display"><span class="val" id="calcVal">—</span></span>
+      <div class="calc-row">
+        <span class="calc-label">Upgraded points (×2 diamonds):</span>
+        <span class="calc-pill" id="calcVal">—</span>
       </div>
     </div>
 
@@ -426,7 +653,7 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
     <div class="toolbar">
       <div class="search-wrap">
         <span class="search-icon">🔍</span>
-        <input class="field input" id="search" placeholder="Search flowers…" oninput="render()"/>
+        <input id="search" placeholder="Search flowers…" oninput="render()"/>
       </div>
       <div class="count-badge" id="countBadge"></div>
     </div>
@@ -451,97 +678,90 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
   </main>
 </div>
 
-<!-- DELETE CONFIRM MODAL -->
+<!-- DELETE MODAL -->
 <div class="modal-overlay" id="deleteModal">
   <div class="modal">
-    <h3>Remove Flower?</h3>
-    <p id="deleteMsg">This will permanently remove the flower from the master list. Players who have it tracked will keep their record, but it won't appear in lookups.</p>
+    <h3>🌺 Remove Flower?</h3>
+    <p id="deleteMsg"></p>
     <div class="btn-group">
-      <button class="btn btn-secondary" onclick="closeDelete()">Cancel</button>
+      <button class="btn btn-secondary" onclick="closeDelete()">Keep It</button>
       <button class="btn btn-danger" onclick="confirmDelete()">Remove</button>
     </div>
   </div>
 </div>
 
 <script>
-const PW = new URLSearchParams(location.search).get('pw') || '';
-const API = (path) => `${path}?pw=${encodeURIComponent(PW)}`;
+const API = (path) => path;
 
-let flowers = [];
+let flowers      = [];
 let activeFilter = 'all';
-let editingName  = null;
 let deleteTarget = null;
 
-// ── HELPERS ──
 function esc(s){ return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])) }
-function toast(msg, type='ok'){
-  const bar = document.getElementById('statusBar');
-  bar.innerHTML = `<div class="toast ${type}">${esc(msg)}</div>`;
-  setTimeout(()=>{ bar.innerHTML=''; }, 4000);
+function toast(msg,type='ok'){
+  const b=document.getElementById('statusBar');
+  b.innerHTML=`<div class="toast ${type}">${esc(msg)}</div>`;
+  setTimeout(()=>{b.innerHTML=''},4500);
 }
 function updateCalc(){
-  const v = parseInt(document.getElementById('fPoints').value)||0;
-  document.getElementById('calcVal').textContent = v ? (v*2)+' pts' : '—';
+  const v=parseInt(document.getElementById('fPoints').value)||0;
+  document.getElementById('calcVal').textContent=v?(v*2)+' pts':'—';
 }
-function rarityOrder(r){ return ({'Shine':0,'Star':1,'Rare':2,'Fine':3,'Basic':4}[r]??9) }
+function rarityOrder(r){return({'Shine':0,'Star':1,'Rare':2,'Fine':3,'Basic':4}[r]??9)}
 
-// ── FILTER ──
-function setFilter(f, el){
-  activeFilter = f;
+function setFilter(f,el){
+  activeFilter=f;
   document.querySelectorAll('.rpill').forEach(p=>p.classList.remove('active'));
   el.classList.add('active');
   render();
 }
 
-// ── LOAD ──
 async function load(){
   try{
-    const r = await fetch(API('/api/flowers'));
-    if(!r.ok) throw new Error('Auth failed — check your password in the URL (?pw=…)');
-    flowers = await r.json();
+    const r=await fetch(API('/api/flowers'));
+    if(!r.ok) throw new Error('Session expired — please refresh.');
+    flowers=await r.json();
     updateSidebar();
     render();
-  } catch(e){ toast(e.message,'err'); }
+  }catch(e){toast(e.message,'err')}
 }
 
 function updateSidebar(){
-  const counts = {};
-  flowers.forEach(f=>{ counts[f.rarity]=(counts[f.rarity]||0)+1; });
-  document.getElementById('sTotal').textContent = flowers.length;
-  document.getElementById('cnt-all').textContent = flowers.length;
+  const counts={};
+  flowers.forEach(f=>{counts[f.rarity]=(counts[f.rarity]||0)+1});
+  document.getElementById('sTotal').textContent=flowers.length;
+  document.getElementById('cnt-all').textContent=flowers.length;
   ['Shine','Star','Rare','Fine','Basic'].forEach(r=>{
-    const el = document.getElementById('cnt-'+r);
-    if(el) el.textContent = counts[r]||0;
+    const el=document.getElementById('cnt-'+r);
+    if(el) el.textContent=counts[r]||0;
   });
 }
 
-// ── RENDER ──
 function render(){
-  const q = document.getElementById('search').value.trim().toLowerCase();
-  let rows = flowers.filter(f=>{
-    const matchFilter = activeFilter==='all' || f.rarity===activeFilter;
-    const matchSearch = !q || f.name.toLowerCase().includes(q) || f.source.toLowerCase().includes(q);
-    return matchFilter && matchSearch;
+  const q=document.getElementById('search').value.trim().toLowerCase();
+  let rows=flowers.filter(f=>{
+    const mf=activeFilter==='all'||f.rarity===activeFilter;
+    const ms=!q||f.name.toLowerCase().includes(q)||f.source.toLowerCase().includes(q);
+    return mf&&ms;
   });
-  rows.sort((a,b)=> rarityOrder(a.rarity)-rarityOrder(b.rarity) || a.name.localeCompare(b.name));
-
-  document.getElementById('countBadge').textContent = `${rows.length} flower${rows.length!==1?'s':''}`;
-  const tbody = document.getElementById('flowerRows');
+  rows.sort((a,b)=>rarityOrder(a.rarity)-rarityOrder(b.rarity)||a.name.localeCompare(b.name));
+  document.getElementById('countBadge').textContent=`${rows.length} flower${rows.length!==1?'s':''}`;
+  const tbody=document.getElementById('flowerRows');
 
   if(!rows.length){
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
-      <div class="icon">🌸</div>
-      <p>${q||activeFilter!=='all' ? 'No flowers match your search.' : 'No flowers yet. Add your first one above.'}</p>
+    tbody.innerHTML=`<tr><td colspan="7"><div class="empty-state">
+      <div class="icon">🌱</div>
+      <p>${q||activeFilter!=='all'?'No flowers match your search.':'No flowers yet — add your first one above!'}</p>
     </div></td></tr>`;
     return;
   }
 
-  tbody.innerHTML = rows.map(f=>`
+  tbody.innerHTML=rows.map(f=>`
     <tr id="row-${CSS.escape(f.name)}">
       <td><span class="flower-name">${esc(f.name)}</span></td>
       <td><span class="rarity-badge ${esc(f.rarity)}">${esc(f.rarity)}</span></td>
-      <td><span class="pts base">${f.base_points}</span></td>
-      <td><span class="pts upgraded">${f.base_points*2}</span></td>
+      <td><span class="pts-base">${f.base_points}</span></td>
+      <td><span class="pts-up">${f.base_points*2}</span></td>
       <td><span class="diamond">💎</span> ${f.upgrade_cost.toLocaleString()}</td>
       <td><span class="source-tag">${esc(f.source)}</span></td>
       <td><div class="actions">
@@ -554,7 +774,7 @@ function render(){
         <div class="edit-form">
           <div class="field">
             <label>Name (locked)</label>
-            <input value="${esc(f.name)}" disabled style="opacity:.5"/>
+            <input value="${esc(f.name)}" disabled style="opacity:.55"/>
           </div>
           <div class="field">
             <label>Rarity</label>
@@ -583,8 +803,8 @@ function render(){
             </div>
           </div>
         </div>
-        <div style="margin-top:10px;font-size:.78rem;color:var(--text2)">
-          Upgraded: <span id="er-${CSS.escape(f.name)}-calc" style="color:var(--gold)">${f.base_points*2} pts</span>
+        <div style="margin-top:10px;font-size:.77rem;color:var(--text2)">
+          Upgraded: <span id="er-${CSS.escape(f.name)}-calc" style="color:var(--wood);font-weight:600">${f.base_points*2} pts</span>
         </div>
       </td>
     </tr>
@@ -592,73 +812,63 @@ function render(){
 }
 
 function updateEditCalc(name){
-  const pts = parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  document.getElementById(`er-${CSS.escape(name)}-calc`).textContent = (pts*2)+' pts';
+  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
+  document.getElementById(`er-${CSS.escape(name)}-calc`).textContent=(pts*2)+' pts';
 }
 
-// ── ADD ──
 async function submitForm(){
-  const name   = document.getElementById('fName').value.trim();
-  const rarity = document.getElementById('fRarity').value;
-  const pts    = parseInt(document.getElementById('fPoints').value)||0;
-  const cost   = parseInt(document.getElementById('fCost').value)||0;
-  const source = document.getElementById('fSource').value.trim()||'Unknown';
-
-  if(!name){ toast('Flower name is required.','err'); return; }
-
-  const r = await fetch(API('/api/flowers'), {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name,rarity,base_points:pts,upgrade_cost:cost,source})
+  const name   =document.getElementById('fName').value.trim();
+  const rarity =document.getElementById('fRarity').value;
+  const pts    =parseInt(document.getElementById('fPoints').value)||0;
+  const cost   =parseInt(document.getElementById('fCost').value)||0;
+  const source =document.getElementById('fSource').value.trim()||'Unknown';
+  if(!name){toast('Flower name is required.','err');return}
+  const r=await fetch(API('/api/flowers'),{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,rarity,base_points:pts,upgrade_cost:cost,source})
   });
-  const d = await r.json();
-  if(!r.ok){ toast(d.error||'Error adding flower.','err'); return; }
-  toast(`✓ "${name}" added to the master list.`);
-  resetForm();
-  await load();
+  const d=await r.json();
+  if(!r.ok){toast(d.error||'Error adding flower.','err');return}
+  toast(`🌸 "${name}" added to the master list!`);
+  resetForm();await load();
 }
 
 function resetForm(){
-  ['fName','fPoints','fCost','fSource'].forEach(id=>{ document.getElementById(id).value=''; });
+  ['fName','fPoints','fCost','fSource'].forEach(id=>{document.getElementById(id).value=''});
   document.getElementById('fRarity').value='Basic';
   document.getElementById('calcVal').textContent='—';
-  document.getElementById('formTitle').textContent='Add New Flower';
+  document.getElementById('formTitle').textContent='🌱 Add New Flower';
   document.getElementById('btnCancel').style.display='none';
-  editingName=null;
 }
-function cancelEdit(){ resetForm(); }
+function cancelEdit(){resetForm()}
 
-// ── EDIT ──
 function startEdit(name){
-  // Close any open edit rows first
   document.querySelectorAll('.edit-row.open').forEach(r=>r.classList.remove('open'));
-  const row = document.getElementById('edit-'+CSS.escape(name));
+  const row=document.getElementById('edit-'+CSS.escape(name));
   if(row) row.classList.add('open');
 }
 function closeEdit(name){
-  const row = document.getElementById('edit-'+CSS.escape(name));
+  const row=document.getElementById('edit-'+CSS.escape(name));
   if(row) row.classList.remove('open');
 }
 async function saveEdit(name){
-  const rarity = document.getElementById(`er-${CSS.escape(name)}-rarity`).value;
-  const pts    = parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  const cost   = parseInt(document.getElementById(`er-${CSS.escape(name)}-cost`).value)||0;
-  const source = document.getElementById(`er-${CSS.escape(name)}-source`).value.trim()||'Unknown';
-
-  const r = await fetch(API(`/api/flowers/${encodeURIComponent(name)}`), {
-    method:'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})
+  const rarity=document.getElementById(`er-${CSS.escape(name)}-rarity`).value;
+  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
+  const cost=parseInt(document.getElementById(`er-${CSS.escape(name)}-cost`).value)||0;
+  const source=document.getElementById(`er-${CSS.escape(name)}-source`).value.trim()||'Unknown';
+  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{
+    method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})
   });
-  const d = await r.json();
-  if(!r.ok){ toast(d.error||'Error saving.','err'); return; }
-  toast(`✓ "${name}" updated.`);
-  await load();
+  const d=await r.json();
+  if(!r.ok){toast(d.error||'Error saving.','err');return}
+  toast(`🌿 "${name}" updated.`);await load();
 }
 
-// ── DELETE ──
 function startDelete(name){
-  deleteTarget = name;
-  document.getElementById('deleteMsg').textContent =
-    `Remove "${name}" from the master list? Players who have it tracked will keep their record, but it won't appear in lookups.`;
+  deleteTarget=name;
+  document.getElementById('deleteMsg').textContent=
+    `Remove "${name}" from the master list? Players who have it tracked will keep their record.`;
   document.getElementById('deleteModal').classList.add('open');
 }
 function closeDelete(){
@@ -667,126 +877,26 @@ function closeDelete(){
 }
 async function confirmDelete(){
   if(!deleteTarget) return;
-  const name = deleteTarget;
-  closeDelete();
-  const r = await fetch(API(`/api/flowers/${encodeURIComponent(name)}`), {method:'DELETE'});
-  const d = await r.json();
-  if(!r.ok){ toast(d.error||'Error removing.','err'); return; }
-  toast(`✓ "${name}" removed.`);
-  await load();
+  const name=deleteTarget;closeDelete();
+  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{method:'DELETE'});
+  const d=await r.json();
+  if(!r.ok){toast(d.error||'Error removing.','err');return}
+  toast(`🌺 "${name}" removed from the list.`);await load();
 }
 
-// ── CLOSE MODAL ON BACKDROP ──
-document.getElementById('deleteModal').addEventListener('click', e=>{
+document.getElementById('deleteModal').addEventListener('click',e=>{
   if(e.target===e.currentTarget) closeDelete();
 });
 
-// ── INIT ──
 load();
 </script>
 </body>
-</html>
-"""
-
-
-LOGIN_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>DWG · Admin Login</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0e0b14;
-  --surface:#18132a;
-  --border:#2e2450;
-  --accent:#c9a0ff;
-  --accent2:#b8f2d0;
-  --text:#e8e0f5;
-  --text2:#9f93c0;
-  --text3:#5e5480;
-  --danger:#ff6b8a;
-  --font-display:\'Playfair Display\',Georgia,serif;
-  --font-body:\'DM Sans\',system-ui,sans-serif;
-  --radius:14px;
-}
-body{
-  background:var(--bg);color:var(--text);font-family:var(--font-body);
-  min-height:100vh;display:flex;align-items:center;justify-content:center;
-  background-image:
-    radial-gradient(ellipse at 20% 10%,rgba(100,60,180,.22) 0%,transparent 55%),
-    radial-gradient(ellipse at 80% 90%,rgba(184,242,208,.1) 0%,transparent 50%);
-}
-.card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--radius);padding:48px 44px;width:100%;max-width:400px;
-  position:relative;overflow:hidden;
-}
-.card::before{
-  content:\'\';position:absolute;top:0;left:0;right:0;height:3px;
-  background:linear-gradient(90deg,var(--accent),var(--accent2),#f4d58d);
-}
-.logo{
-  font-family:var(--font-display);font-size:1.6rem;font-weight:700;
-  color:var(--accent);text-align:center;margin-bottom:6px;
-}
-.subtitle{
-  text-align:center;font-size:.82rem;color:var(--text3);
-  letter-spacing:.06em;text-transform:uppercase;margin-bottom:36px;
-}
-label{
-  display:block;font-size:.72rem;font-weight:500;letter-spacing:.09em;
-  text-transform:uppercase;color:var(--text2);margin-bottom:8px;
-}
-input[type=password]{
-  width:100%;background:#0e0b14;border:1px solid var(--border);
-  border-radius:9px;padding:12px 16px;font-size:.95rem;color:var(--text);
-  font-family:var(--font-body);outline:none;
-  transition:border-color .15s,box-shadow .15s;
-}
-input[type=password]:focus{
-  border-color:var(--accent);
-  box-shadow:0 0 0 3px rgba(201,160,255,.15);
-}
-button{
-  width:100%;margin-top:20px;padding:13px;border:none;
-  border-radius:9px;background:var(--accent);color:#0e0b14;
-  font-size:.95rem;font-weight:600;font-family:var(--font-body);
-  cursor:pointer;transition:opacity .15s,transform .1s;
-}
-button:hover{opacity:.88;transform:translateY(-1px)}
-button:active{transform:none}
-.error{
-  margin-top:16px;padding:11px 14px;border-radius:8px;font-size:.85rem;
-  background:rgba(255,107,138,.1);color:var(--danger);
-  border:1px solid rgba(255,107,138,.25);text-align:center;
-}
-.footer-note{
-  margin-top:28px;text-align:center;font-size:.75rem;color:var(--text3);
-}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo">🌸 Dreamweaving Garden</div>
-  <div class="subtitle">Flower Manager · Admin</div>
-  <form method="POST" action="/login">
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password"
-           placeholder="Enter admin password" autofocus autocomplete="current-password"/>
-    {% if error %}
-    <div class="error">{{ error }}</div>
-    {% endif %}
-    <button type="submit">Sign In</button>
-  </form>
-  <div class="footer-note">Dreamweaving Garden • Grow together, bloom brighter</div>
-</div>
-</body>
 </html>"""
 
+
+# ------------------------------------------------------------------
+# ROUTES
+# ------------------------------------------------------------------
 
 @admin_app.route("/")
 @require_login
@@ -817,10 +927,10 @@ def logout():
 # ------------------------------------------------------------------
 
 def start_admin_dashboard() -> None:
+    port = int(os.getenv("PORT", os.getenv("ADMIN_PORT", 5000)))
     def run():
-        log.info("Admin dashboard starting on port %d", ADMIN_PORT)
-        admin_app.run(host="0.0.0.0", port=ADMIN_PORT, debug=False, use_reloader=False)
-
+        log.info("Admin dashboard starting on port %d", port)
+        admin_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     t = threading.Thread(target=run, daemon=True, name="admin-dashboard")
     t.start()
     log.info("Admin dashboard thread started.")

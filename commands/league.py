@@ -19,11 +19,11 @@ from utils.guards import (
     reject_if_not_setup, reject_if_not_registered, reject_if_not_leader,
 )
 
-DWG_PURPLE = discord.Color(0xC9A0FF)
-DWG_MINT   = discord.Color(0xB8F2D0)
-DWG_PINK   = discord.Color(0xFFB3C1)
-DWG_GOLD   = discord.Color(0xF4D58D)
-DWG_BLUE   = discord.Color(0xBFD7FF)
+DWG_PURPLE = discord.Color(0xF0A8C0)
+DWG_MINT   = discord.Color(0xB8D9B0)
+DWG_PINK   = discord.Color(0xF7CCD8)
+DWG_GOLD   = discord.Color(0xE8C878)
+DWG_BLUE   = discord.Color(0xB8D8F0)
 FOOTER     = "Dreamweaving Garden • Grow together, bloom brighter"
 
 RARITY_ICON = {

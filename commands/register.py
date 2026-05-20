@@ -10,9 +10,9 @@ from db.queries import find_player, register_player
 from db.schema  import get_guild_config
 from utils.guards import reject_if_not_setup
 
-DWG_PURPLE = discord.Color(0xC9A0FF)
-DWG_MINT   = discord.Color(0xB8F2D0)
-DWG_PINK   = discord.Color(0xFFB3C1)
+DWG_PURPLE = discord.Color(0xF0A8C0)
+DWG_MINT   = discord.Color(0xB8D9B0)
+DWG_PINK   = discord.Color(0xF7CCD8)
 
 
 # ------------------------------------------------------------------
