@@ -118,6 +118,61 @@ def api_delete_flower(name: str):
     return jsonify({"status": "ok", "name": name})
 
 
+
+
+# ------------------------------------------------------------------
+# BULK IMPORT — accepts CSV/TSV text parsed client-side from Excel
+# Columns: Flower Name, Type, How to Obtain, Points, Cost to upgrade
+# ------------------------------------------------------------------
+
+@admin_app.route("/api/flowers/bulk", methods=["POST"])
+@require_login
+def api_bulk_import():
+    data  = request.get_json(silent=True) or {}
+    rows  = data.get("rows", [])
+    if not rows:
+        return jsonify({"error": "No rows provided."}), 400
+
+    imported = 0
+    skipped  = 0
+    errors   = []
+
+    for i, row in enumerate(rows):
+        name   = str(row.get("name",   "")).strip()
+        rarity = str(row.get("rarity", "")).strip()
+        source = str(row.get("source", "Unknown")).strip() or "Unknown"
+
+        raw_pts  = str(row.get("points",       "")).strip()
+        raw_cost = str(row.get("upgrade_cost", "")).strip()
+
+        try:
+            base_points  = int(float(raw_pts))  if raw_pts  else 0
+        except ValueError:
+            base_points  = 0
+        try:
+            upgrade_cost = int(float(raw_cost)) if raw_cost else 0
+        except ValueError:
+            upgrade_cost = 0
+
+        if not name:
+            skipped += 1
+            continue
+
+        norm = normalize_rarity(rarity)
+        if norm not in VALID_RARITIES:
+            errors.append(f"Row {i+1}: '{name}' has invalid rarity '{rarity}' — skipped.")
+            skipped += 1
+            continue
+
+        upsert_flower(name, norm, base_points, upgrade_cost, source)
+        imported += 1
+
+    return jsonify({
+        "status":   "ok",
+        "imported": imported,
+        "skipped":  skipped,
+        "errors":   errors,
+    })
 @admin_app.route("/api/rarities", methods=["GET"])
 @require_login
 def api_rarities():
@@ -546,6 +601,27 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 .modal p{font-size:.88rem;color:var(--text2);margin-bottom:24px;line-height:1.6}
 .modal .btn-group{justify-content:flex-end}
 
+
+/* ── IMPORT PANEL ── */
+.import-zone{
+  border:2px dashed var(--pink-mid);border-radius:var(--r);
+  padding:28px;text-align:center;background:var(--pink-soft);
+  transition:all .2s;cursor:pointer;
+}
+.import-zone:hover,.import-zone.drag{
+  border-color:var(--pink);background:var(--pink-mid);
+}
+.import-zone input[type=file]{display:none}
+.import-zone .icon{font-size:2rem;margin-bottom:8px;display:block}
+.import-zone .hint{font-size:.82rem;color:var(--text2);margin-top:6px}
+.progress-wrap{display:none;margin-top:16px}
+.progress-bar{height:8px;border-radius:4px;background:var(--border);overflow:hidden}
+.progress-fill{height:100%;width:0;border-radius:4px;
+  background:linear-gradient(90deg,var(--pink),var(--mint));transition:width .3s}
+.import-results{margin-top:14px;padding:14px;border-radius:var(--r-sm);
+  font-size:.84rem;display:none}
+.import-results.ok{background:var(--mint-soft);color:#287828;border:1.5px solid #90c890}
+.import-results.warn{background:var(--peach-soft);color:#a05020;border:1.5px solid var(--peach)}
 @media(max-width:900px){
   .shell{grid-template-columns:1fr}
   .sidebar{position:static;height:auto}
@@ -612,7 +688,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
         <div style="display:flex;align-items:center;gap:10px">
           <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
           <div>
-            <div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">Flower Master List</div>
+            <div style="display:flex;align-items:center;gap:12px"><div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">Flower Master List</div><button class="btn btn-secondary btn-sm" onclick="toggleImport()" id="importToggle">📥 Bulk Import</button></div>
             <div style="font-size:.78rem;color:var(--text2)">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
           </div>
         </div>
@@ -665,6 +741,44 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
         <span class="calc-label">Upgraded points (×2 diamonds):</span>
         <span class="calc-pill" id="calcVal">—</span>
       </div>
+    </div>
+
+
+    <!-- IMPORT PANEL -->
+    <div class="panel" id="importPanel">
+      <div class="panel-top"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <div class="panel-title" style="margin:0">📥 Bulk Import from Excel / CSV</div>
+        <button class="btn btn-secondary btn-sm" onclick="toggleImport()">Hide</button>
+      </div>
+      <p style="font-size:.83rem;color:var(--text2);margin-bottom:16px;line-height:1.6">
+        Export your spreadsheet as <strong>CSV</strong> (File → Save As → CSV) or copy-paste directly from Excel.<br/>
+        Expected columns: <code>Flower Name · Type · How to Obtain · Points · Cost to upgrade</code>
+      </p>
+      <div class="import-zone" id="dropZone" onclick="document.getElementById('fileInput').click()"
+           ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)">
+        <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx" onchange="handleFile(event)"/>
+        <span class="icon">📂</span>
+        <strong>Click to choose file</strong> or drag &amp; drop here<br/>
+        <span class="hint">Supports .csv, .tsv, or paste from Excel</span>
+      </div>
+
+      <div style="margin-top:14px">
+        <div style="font-size:.78rem;color:var(--text2);margin-bottom:8px">Or paste CSV / tab-separated data directly:</div>
+        <textarea id="pasteArea" rows="5" placeholder="Paste rows here (tab or comma separated)..."
+          style="width:100%;background:var(--parchment);border:1.5px solid var(--border);border-radius:var(--r-sm);
+          padding:10px 13px;font-size:.82rem;color:var(--text);font-family:var(--font-b);resize:vertical;outline:none"></textarea>
+        <div style="display:flex;gap:10px;margin-top:10px">
+          <button class="btn btn-primary" onclick="importFromPaste()">Import Pasted Data</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('pasteArea').value=''">Clear</button>
+        </div>
+      </div>
+
+      <div class="progress-wrap" id="progressWrap">
+        <div style="font-size:.8rem;color:var(--text2);margin-bottom:6px" id="progressLabel">Importing...</div>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      </div>
+      <div class="import-results" id="importResults"></div>
     </div>
 
     <!-- TOOLBAR -->
@@ -905,6 +1019,109 @@ async function confirmDelete(){
 document.getElementById('deleteModal').addEventListener('click',e=>{
   if(e.target===e.currentTarget) closeDelete();
 });
+
+// ── BULK IMPORT ──
+let importVisible = false;
+document.addEventListener('DOMContentLoaded', function(){
+  document.getElementById('importPanel').style.display = 'none';
+});
+function toggleImport(){
+  const panel = document.getElementById('importPanel');
+  importVisible = !importVisible;
+  panel.style.display = importVisible ? '' : 'none';
+  document.getElementById('importToggle').textContent = importVisible ? '🌿 Hide Import' : '📥 Bulk Import';
+}
+
+function dragOver(e){ e.preventDefault(); document.getElementById('dropZone').classList.add('drag'); }
+function dragLeave(){ document.getElementById('dropZone').classList.remove('drag'); }
+function dropFile(e){
+  e.preventDefault(); dragLeave();
+  const file = e.dataTransfer.files[0];
+  if(file) processFile(file);
+}
+function handleFile(e){ if(e.target.files[0]) processFile(e.target.files[0]); }
+
+function processFile(file){
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    document.getElementById('pasteArea').value = e.target.result;
+    importFromPaste();
+  };
+  reader.readAsText(file);
+}
+
+function parseRows(raw){
+  const lines = raw.trim().split(/\r?\n/);
+  if(!lines.length) return [];
+  const first = lines[0];
+  const delim = first.includes('\t') ? '\t' : ',';
+  const firstLower = first.toLowerCase();
+  const hasHeader = firstLower.includes('flower') || firstLower.includes('name') || firstLower.includes('type');
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+
+  return dataLines.map(line => {
+    let cols;
+    if(delim === ','){
+      cols = []; let cur = '', inQ = false;
+      for(let i=0;i<line.length;i++){
+        const c=line[i];
+        if(c==='"'){inQ=!inQ;}
+        else if(c===','&&!inQ){cols.push(cur.trim());cur='';}
+        else{cur+=c;}
+      }
+      cols.push(cur.trim());
+    } else {
+      cols = line.split('\t').map(c=>c.trim());
+    }
+    return {
+      name:         cols[0]||'',
+      rarity:       cols[1]||'',
+      source:       cols[2]||'Unknown',
+      points:       cols[3]||'0',
+      upgrade_cost: cols[4]||'0',
+    };
+  }).filter(r=>r.name.length>0);
+}
+
+async function importFromPaste(){
+  const raw = document.getElementById('pasteArea').value.trim();
+  if(!raw){ toast('Nothing to import — paste some data first.','err'); return; }
+  const rows = parseRows(raw);
+  if(!rows.length){ toast('Could not parse any rows. Check your data format.','err'); return; }
+
+  const wrap=document.getElementById('progressWrap');
+  const fill=document.getElementById('progressFill');
+  const label=document.getElementById('progressLabel');
+  const res=document.getElementById('importResults');
+  wrap.style.display='block'; res.style.display='none';
+  fill.style.width='10%';
+  label.textContent='Importing '+rows.length+' flowers...';
+
+  const r = await fetch(API('/api/flowers/bulk'),{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({rows: rows})
+  });
+  fill.style.width='100%';
+  const d = await r.json();
+  setTimeout(()=>{wrap.style.display='none';fill.style.width='0';},800);
+
+  const hasErrors = d.errors && d.errors.length>0;
+  res.className='import-results '+(hasErrors?'warn':'ok');
+  res.style.display='block';
+
+  let html=(hasErrors?'<strong>&#9888;&#65039; Import Complete</strong>':'<strong>&#127800; Import Complete</strong>')+'<br/>';
+  html+='&#9989; '+d.imported+' flower'+(d.imported!==1?'s':'')+' imported';
+  if(d.skipped) html+=' &nbsp;&#183;&nbsp; &#9193;&#65039; '+d.skipped+' skipped';
+  if(hasErrors){
+    html+='<br/><br/><strong>Issues:</strong><ul style="margin:6px 0 0 16px">';
+    d.errors.slice(0,10).forEach(e=>{html+='<li>'+esc(e)+'</li>';});
+    if(d.errors.length>10) html+='<li>...and '+(d.errors.length-10)+' more</li>';
+    html+='</ul>';
+  }
+  res.innerHTML=html;
+  await load();
+  toast(hasErrors?'Imported '+d.imported+' with '+d.errors.length+' issue(s).':'Imported '+d.imported+' flowers successfully!');
+}
 
 load();
 </script>
