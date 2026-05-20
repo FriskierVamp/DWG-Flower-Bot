@@ -10,9 +10,10 @@ import hmac
 import json
 import logging
 import threading
+import secrets
 from functools import wraps
 
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, session, redirect, url_for
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,20 +25,23 @@ from db.queries import (
 
 log          = logging.getLogger("dwg.admin")
 admin_app    = Flask(__name__)
+admin_app.secret_key = os.getenv("FLASK_SECRET", secrets.token_hex(32))
 ADMIN_SECRET = os.getenv("ADMIN_PASSWORD", "changeme")
 ADMIN_PORT   = int(os.getenv("ADMIN_PORT", 5000))
 
 
 # ------------------------------------------------------------------
-# AUTH
+# AUTH — session based login
 # ------------------------------------------------------------------
 
-def require_admin_password(f):
+def require_login(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        pw = request.args.get("pw") or request.headers.get("X-Admin-Password", "")
-        if not hmac.compare_digest(pw, ADMIN_SECRET):
-            return jsonify({"error": "Unauthorized"}), 401
+        if not session.get("logged_in"):
+            # API calls return JSON 401; page calls redirect to login
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Unauthorized"}), 401
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
 
@@ -47,7 +51,7 @@ def require_admin_password(f):
 # ------------------------------------------------------------------
 
 @admin_app.route("/api/flowers", methods=["GET"])
-@require_admin_password
+@require_login
 def api_get_flowers():
     flowers = get_all_flowers()
     # Sort by rarity order then name
@@ -59,7 +63,7 @@ def api_get_flowers():
 
 
 @admin_app.route("/api/flowers", methods=["POST"])
-@require_admin_password
+@require_login
 def api_add_flower():
     data = request.get_json(silent=True) or {}
     name         = str(data.get("name", "")).strip()
@@ -84,7 +88,7 @@ def api_add_flower():
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["PUT"])
-@require_admin_password
+@require_login
 def api_update_flower(name: str):
     data = request.get_json(silent=True) or {}
     from db.queries import get_flower
@@ -111,7 +115,7 @@ def api_update_flower(name: str):
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["DELETE"])
-@require_admin_password
+@require_login
 def api_delete_flower(name: str):
     from db.queries import delete_flower as df
     deleted = df(name)
@@ -122,7 +126,7 @@ def api_delete_flower(name: str):
 
 
 @admin_app.route("/api/rarities", methods=["GET"])
-@require_admin_password
+@require_login
 def api_rarities():
     rarities = sorted(VALID_RARITIES, key=lambda r: RARITY_ORDER.get(r, 99))
     return jsonify(rarities)
@@ -331,6 +335,13 @@ tbody td{padding:13px 16px;font-size:.88rem;vertical-align:middle}
       <div class="val" id="sTotal">—</div>
       <div class="lbl">Total flowers</div>
     </div>
+    <div class="sidebar-divider"></div>
+    <a href="/logout" style="display:block;padding:9px 14px;border-radius:8px;
+      background:rgba(255,107,138,.1);color:#ff6b8a;border:1px solid rgba(255,107,138,.25);
+      font-size:.8rem;font-weight:500;text-decoration:none;text-align:center;
+      transition:opacity .15s" onmouseover="this.style.opacity=.8" onmouseout="this.style.opacity=1">
+      Sign Out
+    </a>
     <div class="sidebar-divider"></div>
     <div class="sidebar-label">Filter by rarity</div>
     <div class="rarity-pills">
@@ -678,17 +689,127 @@ load();
 """
 
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>DWG · Admin Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0e0b14;
+  --surface:#18132a;
+  --border:#2e2450;
+  --accent:#c9a0ff;
+  --accent2:#b8f2d0;
+  --text:#e8e0f5;
+  --text2:#9f93c0;
+  --text3:#5e5480;
+  --danger:#ff6b8a;
+  --font-display:\'Playfair Display\',Georgia,serif;
+  --font-body:\'DM Sans\',system-ui,sans-serif;
+  --radius:14px;
+}
+body{
+  background:var(--bg);color:var(--text);font-family:var(--font-body);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background-image:
+    radial-gradient(ellipse at 20% 10%,rgba(100,60,180,.22) 0%,transparent 55%),
+    radial-gradient(ellipse at 80% 90%,rgba(184,242,208,.1) 0%,transparent 50%);
+}
+.card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:48px 44px;width:100%;max-width:400px;
+  position:relative;overflow:hidden;
+}
+.card::before{
+  content:\'\';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2),#f4d58d);
+}
+.logo{
+  font-family:var(--font-display);font-size:1.6rem;font-weight:700;
+  color:var(--accent);text-align:center;margin-bottom:6px;
+}
+.subtitle{
+  text-align:center;font-size:.82rem;color:var(--text3);
+  letter-spacing:.06em;text-transform:uppercase;margin-bottom:36px;
+}
+label{
+  display:block;font-size:.72rem;font-weight:500;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--text2);margin-bottom:8px;
+}
+input[type=password]{
+  width:100%;background:#0e0b14;border:1px solid var(--border);
+  border-radius:9px;padding:12px 16px;font-size:.95rem;color:var(--text);
+  font-family:var(--font-body);outline:none;
+  transition:border-color .15s,box-shadow .15s;
+}
+input[type=password]:focus{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(201,160,255,.15);
+}
+button{
+  width:100%;margin-top:20px;padding:13px;border:none;
+  border-radius:9px;background:var(--accent);color:#0e0b14;
+  font-size:.95rem;font-weight:600;font-family:var(--font-body);
+  cursor:pointer;transition:opacity .15s,transform .1s;
+}
+button:hover{opacity:.88;transform:translateY(-1px)}
+button:active{transform:none}
+.error{
+  margin-top:16px;padding:11px 14px;border-radius:8px;font-size:.85rem;
+  background:rgba(255,107,138,.1);color:var(--danger);
+  border:1px solid rgba(255,107,138,.25);text-align:center;
+}
+.footer-note{
+  margin-top:28px;text-align:center;font-size:.75rem;color:var(--text3);
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">🌸 Dreamweaving Garden</div>
+  <div class="subtitle">Flower Manager · Admin</div>
+  <form method="POST" action="/login">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password"
+           placeholder="Enter admin password" autofocus autocomplete="current-password"/>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <button type="submit">Sign In</button>
+  </form>
+  <div class="footer-note">Dreamweaving Garden • Grow together, bloom brighter</div>
+</div>
+</body>
+</html>"""
+
+
 @admin_app.route("/")
+@require_login
 def dashboard_root():
-    pw = request.args.get("pw", "")
-    if not hmac.compare_digest(pw, ADMIN_SECRET):
-        return (
-            "<html><body style='font-family:sans-serif;padding:40px;background:#0e0b14;color:#e8e0f5'>"
-            "<h2>🌸 Dreamweaving Garden Admin</h2>"
-            "<p>Append <code>?pw=YOUR_PASSWORD</code> to the URL to access the dashboard.</p>"
-            "</body></html>"
-        ), 401
     return DASHBOARD_HTML
+
+
+@admin_app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        pw = request.form.get("password", "")
+        if hmac.compare_digest(pw, ADMIN_SECRET):
+            session["logged_in"] = True
+            return redirect(url_for("dashboard_root"))
+        error = "Incorrect password. Please try again."
+    return render_template_string(LOGIN_HTML, error=error)
+
+
+@admin_app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 # ------------------------------------------------------------------
