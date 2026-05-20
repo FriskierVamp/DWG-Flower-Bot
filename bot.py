@@ -107,7 +107,7 @@ register_admin(tree)
 
 
 # ── DB + Dashboard + Run ───────────────────────────────────────────
-from db.queries import init_db
+from db.schema import init_db
 
 init_db()
 log.info("Database ready.")

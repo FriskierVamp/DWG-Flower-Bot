@@ -248,6 +248,56 @@ def upsert_vase(guild_id: str, discord_id: str, vase_type: str,
 
 
 # ------------------------------------------------------------------
+# MASTER VASE LIST (global — mirrors flower list for admin dashboard)
+# ------------------------------------------------------------------
+
+def get_all_vases() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, name, rarity, base_points,
+                      (base_points * 2) AS upgraded_points,
+                      upgrade_cost, source, created_at, updated_at
+               FROM master_vases ORDER BY name COLLATE NOCASE"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_vase(name: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT id, name, rarity, base_points,
+                      (base_points * 2) AS upgraded_points,
+                      upgrade_cost, source
+               FROM master_vases WHERE LOWER(name) = LOWER(?)""",
+            (name.strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_master_vase(name: str, rarity: str, base_points: int,
+                       upgrade_cost: int, source: str) -> None:
+    rarity = normalize_rarity(rarity)
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO master_vases (name, rarity, base_points, upgrade_cost, source)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET
+                   rarity       = excluded.rarity,
+                   base_points  = excluded.base_points,
+                   upgrade_cost = excluded.upgrade_cost,
+                   source       = excluded.source,
+                   updated_at   = datetime('now')""",
+            (name.strip(), rarity, base_points, upgrade_cost, source.strip()),
+        )
+
+
+def delete_vase(name: str) -> bool:
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM master_vases WHERE LOWER(name) = LOWER(?)", (name.strip(),))
+        return cur.rowcount > 0
+
+
+# ------------------------------------------------------------------
 # LEAGUE LOG
 # ------------------------------------------------------------------
 

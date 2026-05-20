@@ -92,6 +92,26 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flowers_rarity ON flowers(rarity)")
 
     # ------------------------------------------------------------------
+    # MASTER VASE LIST
+    # Global — not per-guild. Managed via the Flask admin dashboard.
+    # Mirrors the flowers table structure.
+    # ------------------------------------------------------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS master_vases (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT NOT NULL UNIQUE,
+        rarity          TEXT NOT NULL,
+        base_points     INTEGER NOT NULL DEFAULT 0,
+        upgraded_points INTEGER GENERATED ALWAYS AS (base_points * 2) VIRTUAL,
+        upgrade_cost    INTEGER NOT NULL DEFAULT 0,
+        source          TEXT NOT NULL DEFAULT 'Unknown',
+        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_master_vases_rarity ON master_vases(rarity)")
+
+    # ------------------------------------------------------------------
     # PLAYER FLOWERS
     # Tracks which flowers each player owns.
     # source_type: 'screenshot' or 'manual' — how the entry was created.
