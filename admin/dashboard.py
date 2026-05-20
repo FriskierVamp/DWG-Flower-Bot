@@ -1,1137 +1,724 @@
 """
-admin/dashboard.py
-Dreamweaving Garden Bot — Flask admin dashboard
-Rethemed to match DWG artwork: soft pastels, warm cream, cozy garden aesthetic.
+DWG Flower Bot – Admin Dashboard
+Flask application served in a background thread.
+All HTML/JS uses NO backticks so the Python triple-quoted string stays intact.
 """
 
-import os
 import hmac
 import json
 import logging
+import os
 import threading
-import secrets
-from functools import wraps
 
-from flask import Flask, jsonify, request, render_template_string, session, redirect, url_for
+from flask import Flask, redirect, render_template_string, request, session, url_for
 
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+log = logging.getLogger(__name__)
 
-from db.queries import (
-    get_all_flowers, upsert_flower, delete_flower,
-    normalize_rarity, VALID_RARITIES, RARITY_ORDER,
-)
+admin_app = Flask(__name__)
+admin_app.secret_key = os.getenv("FLASK_SECRET", "dwg-changeme-secret")
 
-log          = logging.getLogger("dwg.admin")
-admin_app    = Flask(__name__)
-admin_app.secret_key = os.getenv("FLASK_SECRET", secrets.token_hex(32))
 ADMIN_SECRET = os.getenv("ADMIN_PASSWORD", "changeme")
-ADMIN_PORT   = int(os.getenv("ADMIN_PORT", 5000))
 
 
-# ------------------------------------------------------------------
-# AUTH — session based
-# ------------------------------------------------------------------
+# ── require login decorator ──────────────────────────────────────────────────
 
 def require_login(f):
+    from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("logged_in"):
-            if request.path.startswith("/api/"):
-                return jsonify({"error": "Unauthorized"}), 401
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
 
 
-# ------------------------------------------------------------------
-# API ROUTES
-# ------------------------------------------------------------------
+# ── DB helpers (lazy import to avoid circular) ───────────────────────────────
+
+def _db():
+    from db.schema import get_db
+    return get_db()
+
+
+# ── API routes ───────────────────────────────────────────────────────────────
 
 @admin_app.route("/api/flowers", methods=["GET"])
 @require_login
-def api_get_flowers():
-    flowers = get_all_flowers()
-    flowers.sort(key=lambda f: (
-        RARITY_ORDER.get(normalize_rarity(f["rarity"]), 99),
-        f["name"].lower()
-    ))
-    return jsonify(flowers)
+def api_flowers_list():
+    cur = _db().execute(
+        "SELECT name, rarity, base_points, upgrade_cost, source "
+        "FROM flowers ORDER BY rarity, name"
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    return json.dumps(rows), 200, {"Content-Type": "application/json"}
 
 
 @admin_app.route("/api/flowers", methods=["POST"])
 @require_login
-def api_add_flower():
-    data = request.get_json(silent=True) or {}
-    name         = str(data.get("name", "")).strip()
-    rarity       = str(data.get("rarity", "")).strip()
-    base_points  = data.get("base_points", 0)
-    upgrade_cost = data.get("upgrade_cost", 0)
-    source       = str(data.get("source", "Unknown")).strip()
-
+def api_flowers_add():
+    data = request.get_json(force=True)
+    name   = (data.get("name") or "").strip()
+    rarity = (data.get("rarity") or "Basic").strip()
+    pts    = int(data.get("base_points") or 0)
+    cost   = int(data.get("upgrade_cost") or 0)
+    source = (data.get("source") or "Unknown").strip()
     if not name:
-        return jsonify({"error": "Flower name is required."}), 400
-    if normalize_rarity(rarity) not in VALID_RARITIES:
-        return jsonify({"error": f"Invalid rarity. Must be one of: {', '.join(sorted(VALID_RARITIES, key=lambda r: RARITY_ORDER.get(r,99)))}"}), 400
+        return json.dumps({"error": "Name required"}), 400, {"Content-Type": "application/json"}
+    db = _db()
     try:
-        base_points  = int(base_points)
-        upgrade_cost = int(upgrade_cost)
-    except (TypeError, ValueError):
-        return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
-
-    upsert_flower(name, rarity, base_points, upgrade_cost, source)
-    return jsonify({"status": "ok", "name": name})
+        db.execute(
+            "INSERT INTO flowers(name,rarity,base_points,upgrade_cost,source) VALUES(?,?,?,?,?)",
+            (name, rarity, pts, cost, source)
+        )
+        db.commit()
+    except Exception as e:
+        return json.dumps({"error": str(e)}), 409, {"Content-Type": "application/json"}
+    return json.dumps({"ok": True}), 201, {"Content-Type": "application/json"}
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["PUT"])
 @require_login
-def api_update_flower(name: str):
-    data = request.get_json(silent=True) or {}
-    from db.queries import get_flower
-    existing = get_flower(name)
-    if not existing:
-        return jsonify({"error": f'Flower "{name}" not found.'}), 404
-
-    rarity       = str(data.get("rarity",       existing["rarity"])).strip()
-    base_points  = data.get("base_points",  existing["base_points"])
-    upgrade_cost = data.get("upgrade_cost", existing["upgrade_cost"])
-    source       = str(data.get("source",   existing["source"])).strip()
-
-    if normalize_rarity(rarity) not in VALID_RARITIES:
-        return jsonify({"error": "Invalid rarity."}), 400
-    try:
-        base_points  = int(base_points)
-        upgrade_cost = int(upgrade_cost)
-    except (TypeError, ValueError):
-        return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
-
-    upsert_flower(name, rarity, base_points, upgrade_cost, source)
-    return jsonify({"status": "ok", "name": name})
+def api_flowers_update(name):
+    data   = request.get_json(force=True)
+    rarity = (data.get("rarity") or "Basic").strip()
+    pts    = int(data.get("base_points") or 0)
+    cost   = int(data.get("upgrade_cost") or 0)
+    source = (data.get("source") or "Unknown").strip()
+    db = _db()
+    db.execute(
+        "UPDATE flowers SET rarity=?,base_points=?,upgrade_cost=?,source=? WHERE name=?",
+        (rarity, pts, cost, source, name)
+    )
+    db.commit()
+    return json.dumps({"ok": True}), 200, {"Content-Type": "application/json"}
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["DELETE"])
 @require_login
-def api_delete_flower(name: str):
-    deleted = delete_flower(name)
-    if not deleted:
-        return jsonify({"error": f'Flower "{name}" not found.'}), 404
-    return jsonify({"status": "ok", "name": name})
+def api_flowers_delete(name):
+    db = _db()
+    db.execute("DELETE FROM flowers WHERE name=?", (name,))
+    db.commit()
+    return json.dumps({"ok": True}), 200, {"Content-Type": "application/json"}
 
-
-
-
-# ------------------------------------------------------------------
-# BULK IMPORT — accepts CSV/TSV text parsed client-side from Excel
-# Columns: Flower Name, Type, How to Obtain, Points, Cost to upgrade
-# ------------------------------------------------------------------
 
 @admin_app.route("/api/flowers/bulk", methods=["POST"])
 @require_login
-def api_bulk_import():
-    data  = request.get_json(silent=True) or {}
-    rows  = data.get("rows", [])
-    if not rows:
-        return jsonify({"error": "No rows provided."}), 400
-
+def api_flowers_bulk():
+    data   = request.get_json(force=True)
+    rows   = data.get("rows", [])
+    db     = _db()
     imported = 0
     skipped  = 0
     errors   = []
-
-    for i, row in enumerate(rows):
-        name   = str(row.get("name",   "")).strip()
-        rarity = str(row.get("rarity", "")).strip()
-        source = str(row.get("source", "Unknown")).strip() or "Unknown"
-
-        raw_pts  = str(row.get("points",       "")).strip()
-        raw_cost = str(row.get("upgrade_cost", "")).strip()
-
+    VALID_RARITIES = {"Basic", "Fine", "Rare", "Star", "Shine"}
+    for row in rows:
+        name   = (row.get("name") or "").strip()
+        rarity = (row.get("rarity") or "Basic").strip().capitalize()
+        source = (row.get("source") or "Unknown").strip()
         try:
-            base_points  = int(float(raw_pts))  if raw_pts  else 0
-        except ValueError:
-            base_points  = 0
-        try:
-            upgrade_cost = int(float(raw_cost)) if raw_cost else 0
-        except ValueError:
-            upgrade_cost = 0
-
+            pts  = int(float(row.get("points") or 0))
+            cost = int(float(row.get("upgrade_cost") or 0))
+        except (ValueError, TypeError):
+            pts, cost = 0, 0
         if not name:
             skipped += 1
             continue
-
-        norm = normalize_rarity(rarity)
-        if norm not in VALID_RARITIES:
-            errors.append(f"Row {i+1}: '{name}' has invalid rarity '{rarity}' — skipped.")
+        if rarity not in VALID_RARITIES:
+            errors.append(f"{name}: invalid rarity '{rarity}'")
             skipped += 1
             continue
-
-        upsert_flower(name, norm, base_points, upgrade_cost, source)
-        imported += 1
-
-    return jsonify({
-        "status":   "ok",
-        "imported": imported,
-        "skipped":  skipped,
-        "errors":   errors,
-    })
-@admin_app.route("/api/rarities", methods=["GET"])
-@require_login
-def api_rarities():
-    rarities = sorted(VALID_RARITIES, key=lambda r: RARITY_ORDER.get(r, 99))
-    return jsonify(rarities)
+        try:
+            db.execute(
+                "INSERT INTO flowers(name,rarity,base_points,upgrade_cost,source) VALUES(?,?,?,?,?)",
+                (name, rarity, pts, cost, source)
+            )
+            imported += 1
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            skipped += 1
+    db.commit()
+    return json.dumps({"imported": imported, "skipped": skipped, "errors": errors}), 200, {
+        "Content-Type": "application/json"
+    }
 
 
-# ------------------------------------------------------------------
-# LOGIN PAGE
-# ------------------------------------------------------------------
+# ── CSS ─────────────────────────────────────────────────────────────────────
+
+CSS = """
+:root{
+  --cream:#fdf8f2;--pink:#f9c6d0;--lavender:#d8c6f0;--mint:#b8e8d0;
+  --sage:#8fbc8f;--wood:#8b5e3c;--text1:#3d2b1f;--text2:#7a5c4a;
+  --border:#e8d5c4;--white:#fff;--shadow:rgba(61,43,31,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--cream);color:var(--text1);min-height:100vh}
+a{color:var(--wood);text-decoration:none}
+
+/* NAV */
+.nav{background:linear-gradient(135deg,var(--lavender),var(--pink));
+  padding:0 24px;display:flex;align-items:center;gap:16px;
+  box-shadow:0 2px 8px var(--shadow);height:56px}
+.nav-brand{font-weight:700;font-size:1.15rem;color:var(--text1);margin-right:auto}
+.nav a{color:var(--text1);font-size:.9rem;padding:6px 12px;border-radius:6px;transition:.2s}
+.nav a:hover{background:rgba(255,255,255,.35)}
+
+/* BANNER */
+.banner{width:100%;max-height:180px;object-fit:cover;display:block}
+
+/* LAYOUT */
+.container{max-width:1100px;margin:0 auto;padding:24px 16px}
+.section{background:var(--white);border-radius:14px;box-shadow:0 2px 12px var(--shadow);
+  padding:24px;margin-bottom:24px}
+h2{font-size:1.2rem;color:var(--wood);margin-bottom:16px;
+  padding-bottom:8px;border-bottom:2px solid var(--pink)}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;
+  border:none;border-radius:8px;cursor:pointer;font-size:.88rem;font-weight:600;transition:.2s}
+.btn-primary{background:var(--lavender);color:var(--text1)}
+.btn-primary:hover{background:#c8b0e8}
+.btn-secondary{background:var(--border);color:var(--text1)}
+.btn-secondary:hover{background:#d8c0ac}
+.btn-success{background:var(--mint);color:var(--text1)}
+.btn-success:hover{background:#90d4b0}
+.btn-danger{background:#f8c8c8;color:#8b2020}
+.btn-danger:hover{background:#f0a0a0}
+.btn-sm{padding:5px 11px;font-size:.8rem}
+.btn-group{display:flex;gap:8px;flex-wrap:wrap}
+
+/* FORM */
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:.82rem;font-weight:600;color:var(--text2)}
+.field input,.field select{padding:8px 10px;border:1px solid var(--border);
+  border-radius:8px;background:var(--cream);font-size:.88rem;color:var(--text1);width:100%}
+.field input:focus,.field select:focus{outline:2px solid var(--lavender);border-color:transparent}
+.calc-hint{font-size:.78rem;color:var(--text2);margin-top:8px}
+
+/* TABLE */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.87rem}
+th{background:linear-gradient(135deg,var(--lavender),var(--pink));
+  color:var(--text1);font-weight:600;padding:10px 12px;text-align:left;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:hover td{background:rgba(248,235,235,.4)}
+
+/* BADGES */
+.flower-name{font-weight:600}
+.rarity-badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.78rem;font-weight:700}
+.rarity-badge.Shine{background:#fff3b0;color:#7a6200}
+.rarity-badge.Star{background:#ffe0f0;color:#8b004a}
+.rarity-badge.Rare{background:var(--lavender);color:#4a1880}
+.rarity-badge.Fine{background:var(--mint);color:#1a5c38}
+.rarity-badge.Basic{background:var(--border);color:var(--text2)}
+.pts-base{color:var(--wood);font-weight:600}
+.pts-up{color:#6a4c93;font-weight:600}
+.source-tag{background:var(--cream);border:1px solid var(--border);border-radius:5px;
+  padding:2px 7px;font-size:.78rem;color:var(--text2)}
+.diamond{font-size:.95rem}
+
+/* EDIT ROW */
+.edit-row{display:none}
+.edit-row.open{display:table-row}
+.edit-row td{background:linear-gradient(135deg,#f9f2ff,#fff2f5);padding:16px}
+.edit-form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.edit-form .field{min-width:130px}
+.edit-form input,.edit-form select{padding:6px 8px;font-size:.83rem}
+
+/* FILTERS */
+.filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+.filters input{flex:1;min-width:180px;padding:8px 12px;border:1px solid var(--border);
+  border-radius:8px;background:var(--cream);font-size:.88rem}
+.filter-btn{padding:6px 14px;border:1px solid var(--border);border-radius:20px;
+  background:var(--white);cursor:pointer;font-size:.82rem;transition:.2s}
+.filter-btn.active,.filter-btn:hover{background:var(--lavender);border-color:var(--lavender)}
+#countBadge{font-size:.82rem;color:var(--text2);margin-left:4px}
+
+/* TOAST */
+#toast{position:fixed;bottom:24px;right:24px;background:var(--wood);color:#fff;
+  padding:12px 20px;border-radius:10px;font-size:.88rem;box-shadow:0 4px 16px rgba(0,0,0,.2);
+  opacity:0;transform:translateY(10px);transition:.3s;pointer-events:none;z-index:9999}
+#toast.show{opacity:1;transform:translateY(0)}
+#toast.err{background:#c0392b}
+
+/* DELETE MODAL */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);
+  display:none;align-items:center;justify-content:center;z-index:999}
+.modal-overlay.open{display:flex}
+.modal{background:var(--white);border-radius:14px;padding:28px;max-width:420px;width:90%;
+  box-shadow:0 8px 32px rgba(0,0,0,.18)}
+.modal h3{margin-bottom:12px;color:var(--wood)}
+.modal p{font-size:.9rem;color:var(--text2);margin-bottom:20px}
+.modal .btn-group{justify-content:flex-end}
+
+/* BULK IMPORT */
+#importPanel{margin-top:16px;border:1px dashed var(--border);border-radius:10px;padding:16px}
+.drop-zone{border:2px dashed var(--lavender);border-radius:10px;padding:24px;text-align:center;
+  color:var(--text2);cursor:pointer;transition:.2s}
+.drop-zone.drag{background:rgba(216,198,240,.2)}
+.progress-wrap{margin:12px 0;display:none}
+.progress-bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.progress-fill{height:100%;background:var(--lavender);width:0;transition:.4s}
+.import-results{padding:12px;border-radius:8px;font-size:.88rem;display:none}
+.import-results.ok{background:#e8f8ee;border:1px solid var(--mint)}
+.import-results.warn{background:#fff8e8;border:1px solid #f0d060}
+
+/* LOGIN */
+.login-page{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,var(--lavender),var(--pink),var(--mint))}
+.login-card{background:var(--white);border-radius:18px;padding:36px 40px;
+  box-shadow:0 8px 40px rgba(0,0,0,.15);width:90%;max-width:380px;text-align:center}
+.login-card img{width:80px;height:80px;border-radius:50%;margin-bottom:16px}
+.login-card h1{font-size:1.4rem;color:var(--wood);margin-bottom:4px}
+.login-card p{font-size:.9rem;color:var(--text2);margin-bottom:24px}
+.login-card input[type=password]{width:100%;padding:10px 14px;border:1px solid var(--border);
+  border-radius:8px;font-size:1rem;background:var(--cream);margin-bottom:14px}
+.login-card button{width:100%;padding:11px;background:var(--lavender);border:none;
+  border-radius:8px;font-size:1rem;font-weight:700;color:var(--text1);cursor:pointer;transition:.2s}
+.login-card button:hover{background:#c8b0e8}
+.login-err{color:#c0392b;font-size:.87rem;margin-bottom:10px}
+"""
+
+# ── Login page HTML ─────────────────────────────────────────────────────────
 
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Dreamweaving Garden · Sign In</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;1,500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --cream:     #fdf6ee;
-  --parchment: #f5ede0;
-  --pink:      #f0a8c0;
-  --pink-soft: #fce4ec;
-  --pink-mid:  #f7ccd8;
-  --lavender:  #d8bef0;
-  --lav-soft:  #ede8f8;
-  --mint:      #b8d9b0;
-  --mint-soft: #dff0db;
-  --sky:       #b8d8f0;
-  --sky-soft:  #e0f0fc;
-  --wood:      #c8905a;
-  --text:      #4a3020;
-  --text2:     #7a5c40;
-  --text3:     #b09070;
-  --border:    #f0d8c8;
-  --white:     #fffaf5;
-  --font-d:    'Playfair Display',Georgia,serif;
-  --font-b:    'DM Sans',system-ui,sans-serif;
-  --r:         16px;
-}
-body{
-  font-family:var(--font-b);
-  min-height:100vh;
-  display:flex;align-items:center;justify-content:center;
-  background:var(--cream);
-  background-image:
-    radial-gradient(ellipse at 15% 15%, rgba(240,168,192,.25) 0%, transparent 50%),
-    radial-gradient(ellipse at 85% 85%, rgba(184,217,176,.25) 0%, transparent 50%),
-    radial-gradient(ellipse at 85% 10%, rgba(216,190,240,.2)  0%, transparent 40%);
-}
-
-/* floating petals */
-.petal{position:fixed;pointer-events:none;font-size:1.2rem;opacity:0;
-  animation:fall linear infinite}
-@keyframes fall{
-  0%  {transform:translateY(-20px) rotate(0deg);  opacity:.7}
-  100%{transform:translateY(110vh) rotate(360deg);opacity:0}
-}
-
-.wrap{
-  width:100%;max-width:440px;padding:16px;
-  display:flex;flex-direction:column;align-items:center;gap:24px;
-}
-
-/* banner image area */
-.banner-art{
-  width:100%;border-radius:20px;overflow:hidden;
-  box-shadow:0 8px 32px rgba(180,120,100,.18);
-  border:3px solid var(--pink-mid);
-  aspect-ratio:3/1;
-  background:linear-gradient(135deg,#fce4ec,#e8f5e9,#e3f2fd);
-  display:flex;align-items:center;justify-content:center;
-  font-size:2.5rem;letter-spacing:.2em;
-}
-
-.card{
-  width:100%;
-  background:var(--white);
-  border:2px solid var(--pink-mid);
-  border-radius:var(--r);
-  padding:40px 36px 32px;
-  box-shadow:0 4px 24px rgba(180,120,100,.12), 0 1px 4px rgba(180,120,100,.08);
-  position:relative;overflow:hidden;
-}
-.card::before{
-  content:'';position:absolute;top:0;left:0;right:0;height:4px;
-  background:linear-gradient(90deg,var(--pink),var(--lavender),var(--mint),var(--sky));
-  border-radius:var(--r) var(--r) 0 0;
-}
-.card::after{
-  content:'🌸';position:absolute;top:12px;right:16px;font-size:1.4rem;opacity:.35;
-}
-
-.logo{
-  font-family:var(--font-d);font-size:1.65rem;font-weight:700;
-  color:var(--text);text-align:center;line-height:1.2;margin-bottom:4px;
-}
-.logo span{color:var(--pink);}
-.tagline{
-  text-align:center;font-size:.78rem;color:var(--text3);
-  letter-spacing:.1em;text-transform:uppercase;margin-bottom:32px;
-}
-
-.field-wrap{margin-bottom:20px}
-label{
-  display:block;font-size:.72rem;font-weight:500;letter-spacing:.08em;
-  text-transform:uppercase;color:var(--text2);margin-bottom:8px;
-}
-input[type=password]{
-  width:100%;background:var(--parchment);
-  border:1.5px solid var(--border);border-radius:10px;
-  padding:13px 16px;font-size:.95rem;color:var(--text);
-  font-family:var(--font-b);outline:none;
-  transition:border-color .2s,box-shadow .2s;
-}
-input[type=password]:focus{
-  border-color:var(--pink);
-  box-shadow:0 0 0 3px rgba(240,168,192,.2);
-  background:var(--white);
-}
-
-button{
-  width:100%;padding:13px;border:none;border-radius:10px;
-  background:linear-gradient(135deg,var(--pink),#e898b8);
-  color:var(--white);font-size:.95rem;font-weight:600;
-  font-family:var(--font-b);cursor:pointer;
-  box-shadow:0 3px 12px rgba(240,168,192,.4);
-  transition:opacity .15s,transform .12s,box-shadow .15s;
-}
-button:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 5px 16px rgba(240,168,192,.5)}
-button:active{transform:none}
-
-.error{
-  margin-top:14px;padding:11px 14px;border-radius:9px;
-  font-size:.84rem;text-align:center;
-  background:#fdf0f3;color:#c05070;
-  border:1.5px solid #f5c0cc;
-}
-
-.flowers-row{
-  display:flex;justify-content:center;gap:8px;
-  font-size:1.3rem;opacity:.5;margin-top:4px;
-}
-.note{text-align:center;font-size:.73rem;color:var(--text3);margin-top:20px}
-</style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DWG Admin – Login</title>
+<style>""" + CSS + """</style>
 </head>
-<body>
-
-<!-- floating petals -->
-<div class="petal" style="left:8%;animation-duration:7s;animation-delay:0s">🌸</div>
-<div class="petal" style="left:22%;animation-duration:9s;animation-delay:2s">🌼</div>
-<div class="petal" style="left:55%;animation-duration:8s;animation-delay:1s">🌸</div>
-<div class="petal" style="left:72%;animation-duration:11s;animation-delay:3s">🌷</div>
-<div class="petal" style="left:88%;animation-duration:7.5s;animation-delay:.5s">🌸</div>
-
-<div class="wrap">
-  <div class="banner-art">
-    <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/login-banner.png" alt="Dreamweaving Garden" style="width:100%;height:100%;object-fit:cover;display:block;"/>
-  </div>
-
-  <div class="card">
-    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:4px">
-      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:44px;height:44px;border-radius:50%;border:2px solid var(--pink-mid);box-shadow:0 2px 8px rgba(240,168,192,.3)"/>
-      <div class="logo">Dreamweaving <span>Garden</span></div>
-    </div>
-    <div class="tagline">✦ Flower Manager · Admin ✦</div>
-
-    <form method="POST" action="/login">
-      <div class="field-wrap">
-        <label for="password">Admin Password</label>
-        <input type="password" id="password" name="password"
-               placeholder="Enter your password…"
-               autofocus autocomplete="current-password"/>
-      </div>
-      {% if error %}
-      <div class="error">🌺 {{ error }}</div>
-      {% endif %}
-      <button type="submit">Sign In to Garden ✦</button>
-    </form>
-
-    <div class="flowers-row">🌸 🌼 🌷 🌿 🌸</div>
-    <div class="note">Dreamweaving Garden • Grow together, bloom brighter</div>
-  </div>
+<body class="login-page">
+<div class="login-card">
+  <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png"
+       alt="DWG icon" onerror="this.style.display='none'">
+  <h1>&#127808; DWG Admin</h1>
+  <p>Dreamweaving Garden flower manager</p>
+  {% if error %}<div class="login-err">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="password" name="password" placeholder="Admin password" autofocus>
+    <button type="submit">Sign In</button>
+  </form>
 </div>
 </body>
 </html>"""
 
 
-# ------------------------------------------------------------------
-# DASHBOARD HTML — full pastel retheme
-# ------------------------------------------------------------------
+# ── Dashboard JS (no backticks — pure string concatenation) ─────────────────
+# Written as a plain Python string so the surrounding triple-quote is never broken.
 
-DASHBOARD_HTML = r"""<!DOCTYPE html>
+DASHBOARD_JS = r"""
+var allFlowers = [];
+var activeFilter = 'all';
+var deleteTarget = null;
+
+function API(path){
+  var base = window.location.origin;
+  return base + path;
+}
+
+function esc(s){
+  if(s == null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function toast(msg, type){
+  var el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (type === 'err' ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(function(){ el.className = ''; }, 3200);
+}
+
+async function load(){
+  var r = await fetch(API('/api/flowers'));
+  allFlowers = await r.json();
+  render();
+}
+
+function render(){
+  var q = (document.getElementById('searchBox').value || '').toLowerCase();
+  var filtered = allFlowers.filter(function(f){
+    if(activeFilter !== 'all' && f.rarity !== activeFilter) return false;
+    if(q && f.name.toLowerCase().indexOf(q) === -1 &&
+       (f.source || '').toLowerCase().indexOf(q) === -1) return false;
+    return true;
+  });
+
+  var countEl = document.getElementById('countBadge');
+  countEl.textContent = filtered.length + ' flower' + (filtered.length !== 1 ? 's' : '');
+
+  var tbody = document.getElementById('flowerTbody');
+  if(!filtered.length){
+    var msg = (q || activeFilter !== 'all') ? 'No flowers match your search.' : 'No flowers yet. Add one above!';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:32px">' + esc(msg) + '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(function(f){
+    var n = JSON.stringify(f.name);
+    var e = CSS.escape(f.name);
+    var opts = ['Shine','Star','Rare','Fine','Basic'].map(function(r){
+      return '<option' + (r === f.rarity ? ' selected' : '') + '>' + r + '</option>';
+    }).join('');
+    return '<tr id="row-' + e + '">'
+      + '<td><span class="flower-name">' + esc(f.name) + '</span></td>'
+      + '<td><span class="rarity-badge ' + esc(f.rarity) + '">' + esc(f.rarity) + '</span></td>'
+      + '<td><span class="pts-base">' + f.base_points + '</span></td>'
+      + '<td><span class="pts-up">' + (f.base_points * 2) + '</span></td>'
+      + '<td>&#128142; ' + f.upgrade_cost.toLocaleString() + '</td>'
+      + '<td><span class="source-tag">' + esc(f.source) + '</span></td>'
+      + '<td><div class="actions btn-group">'
+        + '<button class="btn btn-success btn-sm" onclick="startEdit(' + n + ')">Edit</button>'
+        + '<button class="btn btn-danger btn-sm" onclick="startDelete(' + n + ')">Remove</button>'
+      + '</div></td></tr>'
+      + '<tr class="edit-row" id="edit-' + e + '">'
+      + '<td colspan="7"><div class="edit-form">'
+        + '<div class="field"><label>Name (locked)</label>'
+          + '<input value="' + esc(f.name) + '" disabled style="opacity:.55"/></div>'
+        + '<div class="field"><label>Rarity</label>'
+          + '<select id="er-' + e + '-rarity">' + opts + '</select></div>'
+        + '<div class="field"><label>Base Points</label>'
+          + '<input id="er-' + e + '-pts" type="number" min="0" value="' + f.base_points + '" oninput="updateEditCalc(' + n + ')"/></div>'
+        + '<div class="field"><label>Upgrade Cost &#128142;</label>'
+          + '<input id="er-' + e + '-cost" type="number" min="0" value="' + f.upgrade_cost + '"/></div>'
+        + '<div class="field"><label>Source</label>'
+          + '<input id="er-' + e + '-source" value="' + esc(f.source) + '" maxlength="100"/></div>'
+        + '<div class="field"><label>&nbsp;</label><div class="btn-group">'
+          + '<button class="btn btn-primary btn-sm" onclick="saveEdit(' + n + ')">Save</button>'
+          + '<button class="btn btn-secondary btn-sm" onclick="closeEdit(' + n + ')">Cancel</button>'
+        + '</div></div>'
+      + '</div>'
+      + '<div style="margin-top:10px;font-size:.77rem;color:var(--text2)">'
+        + 'Upgraded: <span id="er-' + e + '-calc" style="color:var(--wood);font-weight:600">' + (f.base_points * 2) + ' pts</span>'
+      + '</div></td></tr>';
+  }).join('');
+}
+
+function updateEditCalc(name){
+  var e = CSS.escape(name);
+  var pts = parseInt(document.getElementById('er-' + e + '-pts').value) || 0;
+  document.getElementById('er-' + e + '-calc').textContent = (pts * 2) + ' pts';
+}
+
+function startEdit(name){
+  document.querySelectorAll('.edit-row.open').forEach(function(r){ r.classList.remove('open'); });
+  var row = document.getElementById('edit-' + CSS.escape(name));
+  if(row) row.classList.add('open');
+}
+function closeEdit(name){
+  var row = document.getElementById('edit-' + CSS.escape(name));
+  if(row) row.classList.remove('open');
+}
+
+async function saveEdit(name){
+  var e = CSS.escape(name);
+  var rarity = document.getElementById('er-' + e + '-rarity').value;
+  var pts    = parseInt(document.getElementById('er-' + e + '-pts').value) || 0;
+  var cost   = parseInt(document.getElementById('er-' + e + '-cost').value) || 0;
+  var source = document.getElementById('er-' + e + '-source').value.trim() || 'Unknown';
+  var r = await fetch(API('/api/flowers/' + encodeURIComponent(name)), {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rarity: rarity, base_points: pts, upgrade_cost: cost, source: source})
+  });
+  var d = await r.json();
+  if(!r.ok){ toast(d.error || 'Error saving.', 'err'); return; }
+  toast('Updated "' + name + '".');
+  await load();
+}
+
+function startDelete(name){
+  deleteTarget = name;
+  document.getElementById('deleteMsg').textContent =
+    'Remove "' + name + '" from the master list? Players who tracked it will keep their record.';
+  document.getElementById('deleteModal').classList.add('open');
+}
+function closeDelete(){
+  deleteTarget = null;
+  document.getElementById('deleteModal').classList.remove('open');
+}
+async function confirmDelete(){
+  if(!deleteTarget) return;
+  var name = deleteTarget;
+  closeDelete();
+  var r = await fetch(API('/api/flowers/' + encodeURIComponent(name)), {method: 'DELETE'});
+  var d = await r.json();
+  if(!r.ok){ toast(d.error || 'Error removing.', 'err'); return; }
+  toast('Removed "' + name + '".');
+  await load();
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  var dm = document.getElementById('deleteModal');
+  if(dm) dm.addEventListener('click', function(ev){ if(ev.target === ev.currentTarget) closeDelete(); });
+  var ip = document.getElementById('importPanel');
+  if(ip) ip.style.display = 'none';
+});
+
+function setFilter(rarity){
+  activeFilter = rarity;
+  document.querySelectorAll('.filter-btn').forEach(function(b){
+    b.classList.toggle('active', b.dataset.rarity === rarity);
+  });
+  render();
+}
+
+async function submitForm(){
+  var name   = document.getElementById('fName').value.trim();
+  var rarity = document.getElementById('fRarity').value;
+  var pts    = parseInt(document.getElementById('fPoints').value) || 0;
+  var cost   = parseInt(document.getElementById('fCost').value) || 0;
+  var source = document.getElementById('fSource').value.trim() || 'Unknown';
+  if(!name){ toast('Flower name is required.', 'err'); return; }
+  var r = await fetch(API('/api/flowers'), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name, rarity: rarity, base_points: pts, upgrade_cost: cost, source: source})
+  });
+  var d = await r.json();
+  if(!r.ok){ toast(d.error || 'Error adding flower.', 'err'); return; }
+  toast('Added "' + name + '" to the master list!');
+  resetForm();
+  await load();
+}
+
+function resetForm(){
+  ['fName','fPoints','fCost','fSource'].forEach(function(id){ document.getElementById(id).value = ''; });
+  document.getElementById('fRarity').value = 'Basic';
+  document.getElementById('calcVal').textContent = '--';
+}
+
+function updateCalc(){
+  var pts = parseInt(document.getElementById('fPoints').value) || 0;
+  document.getElementById('calcVal').textContent = pts ? (pts * 2) + ' pts' : '--';
+}
+
+/* ── BULK IMPORT ── */
+var importVisible = false;
+function toggleImport(){
+  var panel = document.getElementById('importPanel');
+  importVisible = !importVisible;
+  panel.style.display = importVisible ? '' : 'none';
+  document.getElementById('importToggle').textContent = importVisible ? 'Hide Import' : 'Bulk Import';
+}
+function dragOver(ev){ ev.preventDefault(); document.getElementById('dropZone').classList.add('drag'); }
+function dragLeave(){ document.getElementById('dropZone').classList.remove('drag'); }
+function dropFile(ev){
+  ev.preventDefault(); dragLeave();
+  var file = ev.dataTransfer.files[0];
+  if(file) processFile(file);
+}
+function handleFile(ev){ if(ev.target.files[0]) processFile(ev.target.files[0]); }
+function processFile(file){
+  var reader = new FileReader();
+  reader.onload = function(ev){
+    document.getElementById('pasteArea').value = ev.target.result;
+    importFromPaste();
+  };
+  reader.readAsText(file);
+}
+function parseRows(raw){
+  var lines = raw.trim().split(/\r?\n/);
+  if(!lines.length) return [];
+  var first = lines[0];
+  var delim = first.indexOf('\t') !== -1 ? '\t' : ',';
+  var firstLower = first.toLowerCase();
+  var hasHeader = firstLower.indexOf('flower') !== -1 || firstLower.indexOf('name') !== -1 || firstLower.indexOf('type') !== -1;
+  var dataLines = hasHeader ? lines.slice(1) : lines;
+  return dataLines.map(function(line){
+    var cols;
+    if(delim === ','){
+      cols = []; var cur = '', inQ = false;
+      for(var i = 0; i < line.length; i++){
+        var c = line[i];
+        if(c === '"'){ inQ = !inQ; }
+        else if(c === ',' && !inQ){ cols.push(cur.trim()); cur = ''; }
+        else { cur += c; }
+      }
+      cols.push(cur.trim());
+    } else {
+      cols = line.split('\t').map(function(c){ return c.trim(); });
+    }
+    return {name: cols[0]||'', rarity: cols[1]||'', source: cols[2]||'Unknown', points: cols[3]||'0', upgrade_cost: cols[4]||'0'};
+  }).filter(function(r){ return r.name.length > 0; });
+}
+async function importFromPaste(){
+  var raw = document.getElementById('pasteArea').value.trim();
+  if(!raw){ toast('Nothing to import.', 'err'); return; }
+  var rows = parseRows(raw);
+  if(!rows.length){ toast('Could not parse any rows.', 'err'); return; }
+  var wrap = document.getElementById('progressWrap');
+  var fill = document.getElementById('progressFill');
+  var label = document.getElementById('progressLabel');
+  var res = document.getElementById('importResults');
+  wrap.style.display = 'block'; res.style.display = 'none';
+  fill.style.width = '10%';
+  label.textContent = 'Importing ' + rows.length + ' flowers...';
+  var r = await fetch(API('/api/flowers/bulk'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rows: rows})
+  });
+  fill.style.width = '100%';
+  var d = await r.json();
+  setTimeout(function(){ wrap.style.display = 'none'; fill.style.width = '0'; }, 800);
+  var hasErrors = d.errors && d.errors.length > 0;
+  res.className = 'import-results ' + (hasErrors ? 'warn' : 'ok');
+  res.style.display = 'block';
+  var html = (hasErrors ? '<strong>&#9888; Import Complete</strong>' : '<strong>&#127800; Import Complete</strong>') + '<br/>';
+  html += '&#9989; ' + d.imported + ' flower' + (d.imported !== 1 ? 's' : '') + ' imported';
+  if(d.skipped) html += ' &nbsp;&#183;&nbsp; &#9193; ' + d.skipped + ' skipped';
+  if(hasErrors){
+    html += '<br/><br/><strong>Issues:</strong><ul style="margin:6px 0 0 16px">';
+    d.errors.slice(0, 10).forEach(function(e){ html += '<li>' + esc(e) + '</li>'; });
+    if(d.errors.length > 10) html += '<li>...and ' + (d.errors.length - 10) + ' more</li>';
+    html += '</ul>';
+  }
+  res.innerHTML = html;
+  await load();
+  toast(hasErrors ? 'Imported ' + d.imported + ' with ' + d.errors.length + ' issue(s).' : 'Imported ' + d.imported + ' flowers successfully!');
+}
+
+load();
+"""
+
+
+# ── Dashboard HTML ───────────────────────────────────────────────────────────
+
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>DWG · Flower Manager</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;1,500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --cream:      #fdf6ee;
-  --parchment:  #f5ede0;
-  --parchment2: #ede0d0;
-  --white:      #fffaf5;
-  --pink:       #f0a8c0;
-  --pink-soft:  #fce4ec;
-  --pink-mid:   #f7ccd8;
-  --pink-deep:  #e07898;
-  --lav:        #d0aee8;
-  --lav-soft:   #ede8f8;
-  --mint:       #9ecf98;
-  --mint-soft:  #dff0db;
-  --sky:        #98c8e8;
-  --sky-soft:   #daeef8;
-  --peach:      #f7c898;
-  --peach-soft: #fdeede;
-  --wood:       #c8905a;
-  --wood-soft:  #f0dcc8;
-  --text:       #4a3020;
-  --text2:      #7a5c40;
-  --text3:      #b09878;
-  --border:     #f0d8c8;
-  --border2:    #e8c8b8;
-  --shine-c:    #e8b830;
-  --star-c:     #c080e0;
-  --rare-c:     #60a8e0;
-  --fine-c:     #68b880;
-  --basic-c:    #a09878;
-  --font-d:     'Playfair Display',Georgia,serif;
-  --font-b:     'DM Sans',system-ui,sans-serif;
-  --r:          14px;
-  --r-sm:       9px;
-}
-html{font-size:15px}
-body{
-  background:var(--cream);color:var(--text);font-family:var(--font-b);min-height:100vh;
-  background-image:
-    radial-gradient(ellipse at 0% 0%,   rgba(240,168,192,.15) 0%,transparent 45%),
-    radial-gradient(ellipse at 100% 100%,rgba(158,207,152,.15) 0%,transparent 45%),
-    radial-gradient(ellipse at 100% 0%,  rgba(208,174,232,.12) 0%,transparent 40%);
-}
-
-/* ── LAYOUT ── */
-.shell{display:grid;grid-template-columns:260px 1fr;min-height:100vh}
-.sidebar{
-  background:var(--white);border-right:1.5px solid var(--border);
-  padding:28px 20px;display:flex;flex-direction:column;gap:8px;
-  position:sticky;top:0;height:100vh;overflow-y:auto;
-}
-.main{padding:36px 44px;overflow-y:auto}
-
-/* ── SIDEBAR ── */
-.logo{
-  font-family:var(--font-d);font-size:1.25rem;font-weight:700;
-  color:var(--text);line-height:1.25;margin-bottom:4px;
-}
-.logo .accent{color:var(--pink-deep)}
-.logo-sub{font-size:.7rem;color:var(--text3);letter-spacing:.1em;
-  text-transform:uppercase;margin-bottom:4px;font-family:var(--font-b)}
-.logo-divider{height:1.5px;background:linear-gradient(90deg,var(--pink-mid),var(--lav-soft),var(--mint-soft));
-  border-radius:2px;margin:12px 0}
-
-.stat-card{
-  background:var(--parchment);border:1.5px solid var(--border);
-  border-radius:var(--r-sm);padding:12px 14px;margin-bottom:6px;
-}
-.stat-card .val{font-family:var(--font-d);font-size:1.7rem;font-weight:600;color:var(--pink-deep)}
-.stat-card .lbl{font-size:.73rem;color:var(--text2);margin-top:1px}
-
-.sidebar-label{font-size:.67rem;font-weight:500;letter-spacing:.11em;
-  text-transform:uppercase;color:var(--text3);padding:0 4px;margin-bottom:4px;margin-top:6px}
-
-.rarity-pills{display:flex;flex-direction:column;gap:5px;margin-bottom:8px}
-.rpill{display:flex;align-items:center;padding:8px 12px;border-radius:var(--r-sm);
-  font-size:.8rem;font-weight:500;cursor:pointer;border:1.5px solid transparent;
-  transition:all .15s;text-align:left;background:var(--parchment);color:var(--text2)}
-.rpill:hover{transform:translateX(2px);border-color:var(--border2)}
-.rpill.all{background:var(--pink-soft);color:var(--pink-deep);border-color:var(--pink-mid)}
-.rpill.Shine{background:#fef9e7;color:#b8860b;border-color:#f0d070}
-.rpill.Star{background:#f5eeff;color:#8040c0;border-color:#d0a8f0}
-.rpill.Rare{background:#eaf4fd;color:#2878b0;border-color:#90c8f0}
-.rpill.Fine{background:#edfaed;color:#287828;border-color:#80c880}
-.rpill.Basic{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
-.rpill.active{font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.08)}
-.rpill .count{font-size:.7rem;margin-left:auto;opacity:.65}
-
-.signout{
-  display:block;padding:9px 14px;border-radius:var(--r-sm);margin-top:auto;
-  background:var(--pink-soft);color:var(--pink-deep);border:1.5px solid var(--pink-mid);
-  font-size:.8rem;font-weight:500;text-decoration:none;text-align:center;
-  transition:all .15s;
-}
-.signout:hover{background:var(--pink-mid);transform:translateY(-1px)}
-
-/* ── HEADER ── */
-.banner{
-  width:100%;border-radius:18px;overflow:hidden;margin-bottom:28px;
-  border:2px solid var(--pink-mid);
-  background:linear-gradient(135deg,var(--pink-soft),var(--lav-soft),var(--mint-soft),var(--sky-soft));
-  padding:22px 32px;position:relative;
-}
-.banner::after{content:'🌸 🌼 🌷 🌿 🌸';position:absolute;right:24px;top:50%;
-  transform:translateY(-50%);font-size:1.4rem;opacity:.4;letter-spacing:.3em}
-.banner-title{font-family:var(--font-d);font-size:1.7rem;font-weight:700;color:var(--text)}
-.banner-sub{font-size:.83rem;color:var(--text2);margin-top:5px}
-
-/* ── STATUS ── */
-.status-bar{min-height:40px;margin-bottom:14px}
-.toast{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;
-  border-radius:var(--r-sm);font-size:.84rem;animation:fadeIn .2s ease}
-.toast.ok{background:var(--mint-soft);color:#287828;border:1.5px solid #b0d8b0}
-.toast.err{background:var(--pink-soft);color:var(--pink-deep);border:1.5px solid var(--pink-mid)}
-@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
-
-/* ── PANEL ── */
-.panel{
-  background:var(--white);border:1.5px solid var(--border);
-  border-radius:var(--r);padding:26px 28px 22px;margin-bottom:28px;
-  box-shadow:0 2px 12px rgba(180,120,80,.07);
-}
-.panel-top{height:3px;margin:-26px -28px 22px;
-  background:linear-gradient(90deg,var(--pink),var(--lav),var(--mint),var(--sky));
-  border-radius:var(--r) var(--r) 0 0}
-.panel-title{font-family:var(--font-d);font-size:1.05rem;font-weight:600;
-  color:var(--text);margin-bottom:18px}
-
-.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;gap:13px;align-items:end}
-.field label{display:block;font-size:.7rem;font-weight:500;letter-spacing:.09em;
-  text-transform:uppercase;color:var(--text2);margin-bottom:6px}
-.field input,.field select{
-  width:100%;background:var(--parchment);border:1.5px solid var(--border);
-  border-radius:var(--r-sm);padding:10px 13px;font-size:.88rem;color:var(--text);
-  font-family:var(--font-b);transition:border-color .15s,box-shadow .15s;outline:none;
-}
-.field input:focus,.field select:focus{
-  border-color:var(--pink);background:var(--white);
-  box-shadow:0 0 0 3px rgba(240,168,192,.2);
-}
-.field input::placeholder{color:var(--text3)}
-.field select option{background:var(--white)}
-.calc-row{display:flex;align-items:center;gap:10px;margin-top:12px}
-.calc-label{font-size:.75rem;color:var(--text2)}
-.calc-pill{background:var(--peach-soft);border:1.5px solid var(--peach);color:var(--wood);
-  border-radius:999px;padding:4px 14px;font-size:.82rem;font-weight:500}
-
-/* ── BUTTONS ── */
-.btn{padding:10px 18px;border:1.5px solid transparent;border-radius:var(--r-sm);
-  cursor:pointer;font-size:.83rem;font-weight:500;font-family:var(--font-b);
-  transition:all .15s;white-space:nowrap}
-.btn:hover{transform:translateY(-1px)}
-.btn:active{transform:none}
-.btn-primary{background:linear-gradient(135deg,var(--pink),#e898b8);color:var(--white);
-  box-shadow:0 2px 8px rgba(240,168,192,.35);border-color:transparent}
-.btn-secondary{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
-.btn-danger{background:var(--pink-soft);color:var(--pink-deep);border-color:var(--pink-mid)}
-.btn-success{background:var(--mint-soft);color:#287828;border-color:#90c890}
-.btn-sm{padding:6px 12px;font-size:.76rem}
-.btn-group{display:flex;gap:8px;align-items:center}
-
-/* ── TOOLBAR ── */
-.toolbar{display:flex;align-items:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
-.search-wrap{position:relative;flex:1;min-width:200px}
-.search-wrap input{width:100%;padding-left:36px}
-.search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);
-  color:var(--text3);pointer-events:none}
-.count-badge{font-size:.77rem;color:var(--text2)}
-
-/* ── TABLE ── */
-.table-wrap{
-  border:1.5px solid var(--border);border-radius:var(--r);overflow:hidden;
-  box-shadow:0 2px 12px rgba(180,120,80,.06);
-}
-table{width:100%;border-collapse:collapse;background:var(--white)}
-thead th{
-  background:var(--parchment);padding:11px 16px;text-align:left;
-  font-size:.7rem;font-weight:500;letter-spacing:.09em;text-transform:uppercase;
-  color:var(--text2);border-bottom:1.5px solid var(--border);white-space:nowrap;
-}
-tbody tr{border-bottom:1px solid var(--border);transition:background .12s}
-tbody tr:last-child{border-bottom:none}
-tbody tr:hover{background:var(--parchment)}
-tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
-
-.flower-name{font-weight:500;color:var(--text)}
-.rarity-badge{display:inline-block;padding:3px 11px;border-radius:999px;
-  font-size:.7rem;font-weight:600;letter-spacing:.04em;border:1.5px solid transparent}
-.rarity-badge.Shine{background:#fef9e7;color:#b8860b;border-color:#f0d070}
-.rarity-badge.Star{background:#f5eeff;color:#8040c0;border-color:#d0a8f0}
-.rarity-badge.Rare{background:#eaf4fd;color:#2878b0;border-color:#90c8f0}
-.rarity-badge.Fine{background:#edfaed;color:#287828;border-color:#80c880}
-.rarity-badge.Basic{background:var(--parchment);color:var(--text2);border-color:var(--border2)}
-
-.pts-base{font-weight:500;color:var(--text)}
-.pts-up{font-weight:600;color:var(--wood)}
-.diamond{color:var(--sky);font-size:.85em}
-.source-tag{font-size:.77rem;color:var(--text2)}
-.actions{display:flex;gap:6px}
-
-.empty-state{padding:56px 20px;text-align:center;color:var(--text3)}
-.empty-state .icon{font-size:2.5rem;margin-bottom:10px;opacity:.5}
-.empty-state p{font-size:.88rem}
-
-/* ── INLINE EDIT ── */
-.edit-row{display:none}
-.edit-row.open{display:table-row}
-.edit-row td{background:var(--parchment);padding:16px;border-bottom:1.5px solid var(--border)}
-.edit-form{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr auto;gap:12px;align-items:end}
-
-/* ── DELETE MODAL ── */
-.modal-overlay{position:fixed;inset:0;background:rgba(74,48,32,.35);backdrop-filter:blur(2px);
-  display:flex;align-items:center;justify-content:center;z-index:100;
-  opacity:0;pointer-events:none;transition:opacity .2s}
-.modal-overlay.open{opacity:1;pointer-events:all}
-.modal{background:var(--white);border:2px solid var(--pink-mid);border-radius:var(--r);
-  padding:32px;max-width:400px;width:90%;
-  transform:translateY(8px);transition:transform .2s;
-  box-shadow:0 8px 32px rgba(180,120,80,.15)}
-.modal-overlay.open .modal{transform:none}
-.modal h3{font-family:var(--font-d);font-size:1.2rem;margin-bottom:10px;color:var(--pink-deep)}
-.modal p{font-size:.88rem;color:var(--text2);margin-bottom:24px;line-height:1.6}
-.modal .btn-group{justify-content:flex-end}
-
-
-/* ── IMPORT PANEL ── */
-.import-zone{
-  border:2px dashed var(--pink-mid);border-radius:var(--r);
-  padding:28px;text-align:center;background:var(--pink-soft);
-  transition:all .2s;cursor:pointer;
-}
-.import-zone:hover,.import-zone.drag{
-  border-color:var(--pink);background:var(--pink-mid);
-}
-.import-zone input[type=file]{display:none}
-.import-zone .icon{font-size:2rem;margin-bottom:8px;display:block}
-.import-zone .hint{font-size:.82rem;color:var(--text2);margin-top:6px}
-.progress-wrap{display:none;margin-top:16px}
-.progress-bar{height:8px;border-radius:4px;background:var(--border);overflow:hidden}
-.progress-fill{height:100%;width:0;border-radius:4px;
-  background:linear-gradient(90deg,var(--pink),var(--mint));transition:width .3s}
-.import-results{margin-top:14px;padding:14px;border-radius:var(--r-sm);
-  font-size:.84rem;display:none}
-.import-results.ok{background:var(--mint-soft);color:#287828;border:1.5px solid #90c890}
-.import-results.warn{background:var(--peach-soft);color:#a05020;border:1.5px solid var(--peach)}
-@media(max-width:900px){
-  .shell{grid-template-columns:1fr}
-  .sidebar{position:static;height:auto}
-  .main{padding:24px 18px}
-  .form-grid,.edit-form{grid-template-columns:1fr 1fr}
-  .form-grid>:last-child,.edit-form>:last-child{grid-column:1/-1}
-  .banner::after{display:none}
-}
-</style>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DWG Flower Admin</title>
+<style>""" + CSS + """</style>
 </head>
 <body>
-<div class="shell">
 
-  <!-- SIDEBAR -->
-  <aside class="sidebar">
-    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:4px">
-      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:44px;height:44px;border-radius:50%;border:2px solid var(--pink-mid);box-shadow:0 2px 8px rgba(240,168,192,.3)"/>
-      <div class="logo">Dreamweaving <span class="accent">Garden</span></div>
-    </div>
-    <div class="logo-sub">✦ Flower Manager ✦</div>
-    <div class="logo-divider"></div>
+<nav class="nav">
+  <span class="nav-brand">&#127808; DWG Flower Admin</span>
+  <a href="/logout">Logout</a>
+</nav>
 
-    <div class="stat-card">
-      <div class="val" id="sTotal">—</div>
-      <div class="lbl">Flowers in master list</div>
-    </div>
+<img class="banner"
+  src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/banner.png"
+  alt="DWG banner" onerror="this.style.display='none'">
 
-    <div class="logo-divider"></div>
-    <div class="sidebar-label">Filter by Rarity</div>
-    <div class="rarity-pills">
-      <button class="rpill all active" onclick="setFilter('all',this)">
-        🌸 All Flowers <span class="count" id="cnt-all"></span>
-      </button>
-      <button class="rpill Shine" onclick="setFilter('Shine',this)">
-        ✦ Shine <span class="count" id="cnt-Shine"></span>
-      </button>
-      <button class="rpill Star" onclick="setFilter('Star',this)">
-        ★ Star <span class="count" id="cnt-Star"></span>
-      </button>
-      <button class="rpill Rare" onclick="setFilter('Rare',this)">
-        ◆ Rare <span class="count" id="cnt-Rare"></span>
-      </button>
-      <button class="rpill Fine" onclick="setFilter('Fine',this)">
-        ◇ Fine <span class="count" id="cnt-Fine"></span>
-      </button>
-      <button class="rpill Basic" onclick="setFilter('Basic',this)">
-        · Basic <span class="count" id="cnt-Basic"></span>
-      </button>
-    </div>
+<div class="container">
 
-    <div class="logo-divider"></div>
-    <a href="/logout" class="signout">🌿 Sign Out</a>
-  </aside>
-
-  <!-- MAIN -->
-  <main class="main">
-
-    <!-- BANNER -->
-    <div class="banner" style="padding:0;background:none;border:2px solid var(--pink-mid);border-radius:18px;overflow:hidden;box-shadow:0 4px 20px rgba(180,120,80,.12);position:relative;">
-      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/banner.png" alt="Dreamweaving Garden" style="width:100%;display:block;max-height:180px;object-fit:cover;object-position:center 40%"/>
-      <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 24px;
-        background:linear-gradient(transparent,rgba(253,246,238,.92));
-        border-top:1px solid rgba(240,168,192,.2)">
-        <div style="display:flex;align-items:center;gap:10px">
-          <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
-          <div>
-            <div style="display:flex;align-items:center;gap:12px"><div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">Flower Master List</div><button class="btn btn-secondary btn-sm" onclick="toggleImport()" id="importToggle">📥 Bulk Import</button></div>
-            <div style="font-size:.78rem;color:var(--text2)">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
-          </div>
+  <!-- Add flower -->
+  <div class="section">
+    <h2>&#127799; Add New Flower</h2>
+    <div class="form-grid">
+      <div class="field">
+        <label>Flower Name</label>
+        <input id="fName" type="text" placeholder="Sunbloom Lily" maxlength="100">
+      </div>
+      <div class="field">
+        <label>Rarity</label>
+        <select id="fRarity">
+          <option>Basic</option><option>Fine</option><option>Rare</option>
+          <option>Star</option><option>Shine</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Base Points</label>
+        <input id="fPoints" type="number" min="0" placeholder="0" oninput="updateCalc()">
+      </div>
+      <div class="field">
+        <label>Upgrade Cost &#128142;</label>
+        <input id="fCost" type="number" min="0" placeholder="0">
+      </div>
+      <div class="field">
+        <label>How to Obtain</label>
+        <input id="fSource" type="text" placeholder="Event / Shop / Drop" maxlength="100">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <div class="btn-group">
+          <button class="btn btn-primary" onclick="submitForm()">&#10010; Add Flower</button>
         </div>
       </div>
     </div>
+    <p class="calc-hint">Upgraded pts: <strong id="calcVal">--</strong></p>
+  </div>
 
-    <!-- STATUS -->
-    <div class="status-bar" id="statusBar"></div>
-
-    <!-- ADD FORM -->
-    <div class="panel">
-      <div class="panel-top"></div>
-      <div class="panel-title" id="formTitle">🌱 Add New Flower</div>
-      <div class="form-grid">
-        <div class="field">
-          <label>Flower Name</label>
-          <input id="fName" placeholder="e.g. Moonbloom Rose" maxlength="100"/>
-        </div>
-        <div class="field">
-          <label>Rarity</label>
-          <select id="fRarity">
-            <option value="Shine">✦ Shine</option>
-            <option value="Star">★ Star</option>
-            <option value="Rare">◆ Rare</option>
-            <option value="Fine">◇ Fine</option>
-            <option value="Basic" selected>· Basic</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>Base Points</label>
-          <input id="fPoints" type="number" min="0" placeholder="0" oninput="updateCalc()"/>
-        </div>
-        <div class="field">
-          <label>Upgrade Cost 💎</label>
-          <input id="fCost" type="number" min="0" placeholder="0"/>
-        </div>
-        <div class="field">
-          <label>Source</label>
-          <input id="fSource" placeholder="Garden, Shop, Event…" maxlength="100"/>
-        </div>
-        <div class="field">
-          <label>&nbsp;</label>
-          <div class="btn-group">
-            <button class="btn btn-primary" onclick="submitForm()">Add ✦</button>
-            <button class="btn btn-secondary" id="btnCancel" onclick="cancelEdit()" style="display:none">Cancel</button>
-          </div>
-        </div>
-      </div>
-      <div class="calc-row">
-        <span class="calc-label">Upgraded points (×2 diamonds):</span>
-        <span class="calc-pill" id="calcVal">—</span>
-      </div>
+  <!-- Bulk import -->
+  <div class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <h2 style="margin-bottom:0;border:none;padding:0">&#128229; Bulk Import</h2>
+      <button id="importToggle" class="btn btn-secondary btn-sm" onclick="toggleImport()">Bulk Import</button>
     </div>
-
-
-    <!-- IMPORT PANEL -->
-    <div class="panel" id="importPanel">
-      <div class="panel-top"></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
-        <div class="panel-title" style="margin:0">📥 Bulk Import from Excel / CSV</div>
-        <button class="btn btn-secondary btn-sm" onclick="toggleImport()">Hide</button>
+    <div id="importPanel">
+      <div id="dropZone" class="drop-zone" style="margin-top:12px"
+           ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)"
+           onclick="document.getElementById('fileInput').click()">
+        &#128229; Drop a CSV / TSV here or click to browse
+        <input id="fileInput" type="file" accept=".csv,.tsv,.txt" style="display:none" onchange="handleFile(event)">
       </div>
-      <p style="font-size:.83rem;color:var(--text2);margin-bottom:16px;line-height:1.6">
-        Export your spreadsheet as <strong>CSV</strong> (File → Save As → CSV) or copy-paste directly from Excel.<br/>
-        Expected columns: <code>Flower Name · Type · How to Obtain · Points · Cost to upgrade</code>
-      </p>
-      <div class="import-zone" id="dropZone" onclick="document.getElementById('fileInput').click()"
-           ondragover="dragOver(event)" ondragleave="dragLeave()" ondrop="dropFile(event)">
-        <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx" onchange="handleFile(event)"/>
-        <span class="icon">📂</span>
-        <strong>Click to choose file</strong> or drag &amp; drop here<br/>
-        <span class="hint">Supports .csv, .tsv, or paste from Excel</span>
+      <div style="text-align:center;margin:8px 0;color:var(--text2);font-size:.85rem">or paste below</div>
+      <textarea id="pasteArea" rows="4" style="width:100%;padding:8px;border:1px solid var(--border);
+        border-radius:8px;font-size:.83rem;background:var(--cream)" placeholder="Name&#9;Rarity&#9;Source&#9;Points&#9;UpgradeCost"></textarea>
+      <div style="margin-top:8px">
+        <button class="btn btn-primary" onclick="importFromPaste()">Import</button>
       </div>
-
-      <div style="margin-top:14px">
-        <div style="font-size:.78rem;color:var(--text2);margin-bottom:8px">Or paste CSV / tab-separated data directly:</div>
-        <textarea id="pasteArea" rows="5" placeholder="Paste rows here (tab or comma separated)..."
-          style="width:100%;background:var(--parchment);border:1.5px solid var(--border);border-radius:var(--r-sm);
-          padding:10px 13px;font-size:.82rem;color:var(--text);font-family:var(--font-b);resize:vertical;outline:none"></textarea>
-        <div style="display:flex;gap:10px;margin-top:10px">
-          <button class="btn btn-primary" onclick="importFromPaste()">Import Pasted Data</button>
-          <button class="btn btn-secondary" onclick="document.getElementById('pasteArea').value=''">Clear</button>
-        </div>
+      <div id="progressWrap" class="progress-wrap">
+        <div id="progressLabel" style="font-size:.82rem;color:var(--text2);margin-bottom:4px"></div>
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
       </div>
-
-      <div class="progress-wrap" id="progressWrap">
-        <div style="font-size:.8rem;color:var(--text2);margin-bottom:6px" id="progressLabel">Importing...</div>
-        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-      </div>
-      <div class="import-results" id="importResults"></div>
+      <div id="importResults" class="import-results"></div>
     </div>
+  </div>
 
-    <!-- TOOLBAR -->
-    <div class="toolbar">
-      <div class="search-wrap">
-        <span class="search-icon">🔍</span>
-        <input id="search" placeholder="Search flowers…" oninput="render()"/>
-      </div>
-      <div class="count-badge" id="countBadge"></div>
+  <!-- Flower list -->
+  <div class="section">
+    <h2>&#127807; Flower Master List <span id="countBadge"></span></h2>
+    <div class="filters">
+      <input id="searchBox" type="text" placeholder="Search flowers..." oninput="render()">
+      <button class="filter-btn active" data-rarity="all" onclick="setFilter('all')">All</button>
+      <button class="filter-btn" data-rarity="Basic" onclick="setFilter('Basic')">Basic</button>
+      <button class="filter-btn" data-rarity="Fine" onclick="setFilter('Fine')">Fine</button>
+      <button class="filter-btn" data-rarity="Rare" onclick="setFilter('Rare')">Rare</button>
+      <button class="filter-btn" data-rarity="Star" onclick="setFilter('Star')">&#11088; Star</button>
+      <button class="filter-btn" data-rarity="Shine" onclick="setFilter('Shine')">&#10024; Shine</button>
     </div>
-
-    <!-- TABLE -->
-    <div class="table-wrap">
+    <div class="tbl-wrap">
       <table>
-        <thead>
-          <tr>
-            <th>Flower</th>
-            <th>Rarity</th>
-            <th>Base pts</th>
-            <th>Upgraded pts</th>
-            <th>Upgrade cost</th>
-            <th>Source</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="flowerRows"></tbody>
+        <thead><tr>
+          <th>Name</th><th>Rarity</th><th>Base pts</th><th>Upgraded</th>
+          <th>Cost &#128142;</th><th>Source</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="flowerTbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text2)">Loading...</td></tr></tbody>
       </table>
     </div>
-  </main>
-</div>
+  </div>
 
-<!-- DELETE MODAL -->
+</div><!-- /container -->
+
+<!-- Delete modal -->
 <div class="modal-overlay" id="deleteModal">
   <div class="modal">
-    <h3>🌺 Remove Flower?</h3>
+    <h3>&#128465; Remove Flower</h3>
     <p id="deleteMsg"></p>
     <div class="btn-group">
-      <button class="btn btn-secondary" onclick="closeDelete()">Keep It</button>
+      <button class="btn btn-secondary" onclick="closeDelete()">Cancel</button>
       <button class="btn btn-danger" onclick="confirmDelete()">Remove</button>
     </div>
   </div>
 </div>
 
+<!-- Toast -->
+<div id="toast"></div>
+
 <script>
-const API = (path) => path;
-
-let flowers      = [];
-let activeFilter = 'all';
-let deleteTarget = null;
-
-function esc(s){ return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])) }
-function toast(msg,type='ok'){
-  const b=document.getElementById('statusBar');
-  b.innerHTML=`<div class="toast ${type}">${esc(msg)}</div>`;
-  setTimeout(()=>{b.innerHTML=''},4500);
-}
-function updateCalc(){
-  const v=parseInt(document.getElementById('fPoints').value)||0;
-  document.getElementById('calcVal').textContent=v?(v*2)+' pts':'—';
-}
-function rarityOrder(r){return({'Shine':0,'Star':1,'Rare':2,'Fine':3,'Basic':4}[r]??9)}
-
-function setFilter(f,el){
-  activeFilter=f;
-  document.querySelectorAll('.rpill').forEach(p=>p.classList.remove('active'));
-  el.classList.add('active');
-  render();
-}
-
-async function load(){
-  try{
-    const r=await fetch(API('/api/flowers'));
-    if(!r.ok) throw new Error('Session expired — please refresh.');
-    flowers=await r.json();
-    updateSidebar();
-    render();
-  }catch(e){toast(e.message,'err')}
-}
-
-function updateSidebar(){
-  const counts={};
-  flowers.forEach(f=>{counts[f.rarity]=(counts[f.rarity]||0)+1});
-  document.getElementById('sTotal').textContent=flowers.length;
-  document.getElementById('cnt-all').textContent=flowers.length;
-  ['Shine','Star','Rare','Fine','Basic'].forEach(r=>{
-    const el=document.getElementById('cnt-'+r);
-    if(el) el.textContent=counts[r]||0;
-  });
-}
-
-function render(){
-  const q=document.getElementById('search').value.trim().toLowerCase();
-  let rows=flowers.filter(f=>{
-    const mf=activeFilter==='all'||f.rarity===activeFilter;
-    const ms=!q||f.name.toLowerCase().includes(q)||f.source.toLowerCase().includes(q);
-    return mf&&ms;
-  });
-  rows.sort((a,b)=>rarityOrder(a.rarity)-rarityOrder(b.rarity)||a.name.localeCompare(b.name));
-  document.getElementById('countBadge').textContent=`${rows.length} flower${rows.length!==1?'s':''}`;
-  const tbody=document.getElementById('flowerRows');
-
-  if(!rows.length){
-    tbody.innerHTML=`<tr><td colspan="7"><div class="empty-state">
-      <div class="icon">🌱</div>
-      <p>${q||activeFilter!=='all'?'No flowers match your search.':'No flowers yet — add your first one above!'}</p>
-    </div></td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML=rows.map(f=>`
-    <tr id="row-${CSS.escape(f.name)}">
-      <td><span class="flower-name">${esc(f.name)}</span></td>
-      <td><span class="rarity-badge ${esc(f.rarity)}">${esc(f.rarity)}</span></td>
-      <td><span class="pts-base">${f.base_points}</span></td>
-      <td><span class="pts-up">${f.base_points*2}</span></td>
-      <td><span class="diamond">💎</span> ${f.upgrade_cost.toLocaleString()}</td>
-      <td><span class="source-tag">${esc(f.source)}</span></td>
-      <td><div class="actions">
-        <button class="btn btn-success btn-sm" onclick="startEdit(${JSON.stringify(f.name)})">Edit</button>
-        <button class="btn btn-danger btn-sm" onclick="startDelete(${JSON.stringify(f.name)})">Remove</button>
-      </div></td>
-    </tr>
-    <tr class="edit-row" id="edit-${CSS.escape(f.name)}">
-      <td colspan="7">
-        <div class="edit-form">
-          <div class="field">
-            <label>Name (locked)</label>
-            <input value="${esc(f.name)}" disabled style="opacity:.55"/>
-          </div>
-          <div class="field">
-            <label>Rarity</label>
-            <select id="er-${CSS.escape(f.name)}-rarity">
-              ${['Shine','Star','Rare','Fine','Basic'].map(r=>`<option${r===f.rarity?' selected':''}>${r}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field">
-            <label>Base Points</label>
-            <input id="er-${CSS.escape(f.name)}-pts" type="number" min="0" value="${f.base_points}"
-              oninput="updateEditCalc(${JSON.stringify(f.name)})"/>
-          </div>
-          <div class="field">
-            <label>Upgrade Cost 💎</label>
-            <input id="er-${CSS.escape(f.name)}-cost" type="number" min="0" value="${f.upgrade_cost}"/>
-          </div>
-          <div class="field">
-            <label>Source</label>
-            <input id="er-${CSS.escape(f.name)}-source" value="${esc(f.source)}" maxlength="100"/>
-          </div>
-          <div class="field">
-            <label>&nbsp;</label>
-            <div class="btn-group">
-              <button class="btn btn-primary btn-sm" onclick="saveEdit(${JSON.stringify(f.name)})">Save</button>
-              <button class="btn btn-secondary btn-sm" onclick="closeEdit(${JSON.stringify(f.name)})">Cancel</button>
-            </div>
-          </div>
-        </div>
-        <div style="margin-top:10px;font-size:.77rem;color:var(--text2)">
-          Upgraded: <span id="er-${CSS.escape(f.name)}-calc" style="color:var(--wood);font-weight:600">${f.base_points*2} pts</span>
-        </div>
-      </td>
-    </tr>
-  `).join('');
-}
-
-function updateEditCalc(name){
-  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  document.getElementById(`er-${CSS.escape(name)}-calc`).textContent=(pts*2)+' pts';
-}
-
-async function submitForm(){
-  const name   =document.getElementById('fName').value.trim();
-  const rarity =document.getElementById('fRarity').value;
-  const pts    =parseInt(document.getElementById('fPoints').value)||0;
-  const cost   =parseInt(document.getElementById('fCost').value)||0;
-  const source =document.getElementById('fSource').value.trim()||'Unknown';
-  if(!name){toast('Flower name is required.','err');return}
-  const r=await fetch(API('/api/flowers'),{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name,rarity,base_points:pts,upgrade_cost:cost,source})
-  });
-  const d=await r.json();
-  if(!r.ok){toast(d.error||'Error adding flower.','err');return}
-  toast(`🌸 "${name}" added to the master list!`);
-  resetForm();await load();
-}
-
-function resetForm(){
-  ['fName','fPoints','fCost','fSource'].forEach(id=>{document.getElementById(id).value=''});
-  document.getElementById('fRarity').value='Basic';
-  document.getElementById('calcVal').textContent='—';
-  document.getElementById('formTitle').textContent='🌱 Add New Flower';
-  document.getElementById('btnCancel').style.display='none';
-}
-function cancelEdit(){resetForm()}
-
-function startEdit(name){
-  document.querySelectorAll('.edit-row.open').forEach(r=>r.classList.remove('open'));
-  const row=document.getElementById('edit-'+CSS.escape(name));
-  if(row) row.classList.add('open');
-}
-function closeEdit(name){
-  const row=document.getElementById('edit-'+CSS.escape(name));
-  if(row) row.classList.remove('open');
-}
-async function saveEdit(name){
-  const rarity=document.getElementById(`er-${CSS.escape(name)}-rarity`).value;
-  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  const cost=parseInt(document.getElementById(`er-${CSS.escape(name)}-cost`).value)||0;
-  const source=document.getElementById(`er-${CSS.escape(name)}-source`).value.trim()||'Unknown';
-  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{
-    method:'PUT',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})
-  });
-  const d=await r.json();
-  if(!r.ok){toast(d.error||'Error saving.','err');return}
-  toast(`🌿 "${name}" updated.`);await load();
-}
-
-function startDelete(name){
-  deleteTarget=name;
-  document.getElementById('deleteMsg').textContent=
-    `Remove "${name}" from the master list? Players who have it tracked will keep their record.`;
-  document.getElementById('deleteModal').classList.add('open');
-}
-function closeDelete(){
-  deleteTarget=null;
-  document.getElementById('deleteModal').classList.remove('open');
-}
-async function confirmDelete(){
-  if(!deleteTarget) return;
-  const name=deleteTarget;closeDelete();
-  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{method:'DELETE'});
-  const d=await r.json();
-  if(!r.ok){toast(d.error||'Error removing.','err');return}
-  toast(`🌺 "${name}" removed from the list.`);await load();
-}
-
-document.getElementById('deleteModal').addEventListener('click',e=>{
-  if(e.target===e.currentTarget) closeDelete();
-});
-
-// ── BULK IMPORT ──
-let importVisible = false;
-document.addEventListener('DOMContentLoaded', function(){
-  document.getElementById('importPanel').style.display = 'none';
-});
-function toggleImport(){
-  const panel = document.getElementById('importPanel');
-  importVisible = !importVisible;
-  panel.style.display = importVisible ? '' : 'none';
-  document.getElementById('importToggle').textContent = importVisible ? '🌿 Hide Import' : '📥 Bulk Import';
-}
-
-function dragOver(e){ e.preventDefault(); document.getElementById('dropZone').classList.add('drag'); }
-function dragLeave(){ document.getElementById('dropZone').classList.remove('drag'); }
-function dropFile(e){
-  e.preventDefault(); dragLeave();
-  const file = e.dataTransfer.files[0];
-  if(file) processFile(file);
-}
-function handleFile(e){ if(e.target.files[0]) processFile(e.target.files[0]); }
-
-function processFile(file){
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    document.getElementById('pasteArea').value = e.target.result;
-    importFromPaste();
-  };
-  reader.readAsText(file);
-}
-
-function parseRows(raw){
-  const lines = raw.trim().split(/\r?\n/);
-  if(!lines.length) return [];
-  const first = lines[0];
-  const delim = first.includes('\t') ? '\t' : ',';
-  const firstLower = first.toLowerCase();
-  const hasHeader = firstLower.includes('flower') || firstLower.includes('name') || firstLower.includes('type');
-  const dataLines = hasHeader ? lines.slice(1) : lines;
-
-  return dataLines.map(line => {
-    let cols;
-    if(delim === ','){
-      cols = []; let cur = '', inQ = false;
-      for(let i=0;i<line.length;i++){
-        const c=line[i];
-        if(c==='"'){inQ=!inQ;}
-        else if(c===','&&!inQ){cols.push(cur.trim());cur='';}
-        else{cur+=c;}
-      }
-      cols.push(cur.trim());
-    } else {
-      cols = line.split('\t').map(c=>c.trim());
-    }
-    return {
-      name:         cols[0]||'',
-      rarity:       cols[1]||'',
-      source:       cols[2]||'Unknown',
-      points:       cols[3]||'0',
-      upgrade_cost: cols[4]||'0',
-    };
-  }).filter(r=>r.name.length>0);
-}
-
-async function importFromPaste(){
-  const raw = document.getElementById('pasteArea').value.trim();
-  if(!raw){ toast('Nothing to import — paste some data first.','err'); return; }
-  const rows = parseRows(raw);
-  if(!rows.length){ toast('Could not parse any rows. Check your data format.','err'); return; }
-
-  const wrap=document.getElementById('progressWrap');
-  const fill=document.getElementById('progressFill');
-  const label=document.getElementById('progressLabel');
-  const res=document.getElementById('importResults');
-  wrap.style.display='block'; res.style.display='none';
-  fill.style.width='10%';
-  label.textContent='Importing '+rows.length+' flowers...';
-
-  const r = await fetch(API('/api/flowers/bulk'),{
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({rows: rows})
-  });
-  fill.style.width='100%';
-  const d = await r.json();
-  setTimeout(()=>{wrap.style.display='none';fill.style.width='0';},800);
-
-  const hasErrors = d.errors && d.errors.length>0;
-  res.className='import-results '+(hasErrors?'warn':'ok');
-  res.style.display='block';
-
-  let html=(hasErrors?'<strong>&#9888;&#65039; Import Complete</strong>':'<strong>&#127800; Import Complete</strong>')+'<br/>';
-  html+='&#9989; '+d.imported+' flower'+(d.imported!==1?'s':'')+' imported';
-  if(d.skipped) html+=' &nbsp;&#183;&nbsp; &#9193;&#65039; '+d.skipped+' skipped';
-  if(hasErrors){
-    html+='<br/><br/><strong>Issues:</strong><ul style="margin:6px 0 0 16px">';
-    d.errors.slice(0,10).forEach(e=>{html+='<li>'+esc(e)+'</li>';});
-    if(d.errors.length>10) html+='<li>...and '+(d.errors.length-10)+' more</li>';
-    html+='</ul>';
-  }
-  res.innerHTML=html;
-  await load();
-  toast(hasErrors?'Imported '+d.imported+' with '+d.errors.length+' issue(s).':'Imported '+d.imported+' flowers successfully!');
-}
-
-load();
+""" + DASHBOARD_JS + """
 </script>
 </body>
 </html>"""
 
 
-# ------------------------------------------------------------------
-# ROUTES
-# ------------------------------------------------------------------
+# ── Routes ───────────────────────────────────────────────────────────────────
 
 @admin_app.route("/")
 @require_login
@@ -1157,9 +744,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-# ------------------------------------------------------------------
-# THREAD LAUNCHER
-# ------------------------------------------------------------------
+# ── Thread launcher ──────────────────────────────────────────────────────────
 
 def start_admin_dashboard() -> None:
     port = int(os.getenv("PORT", os.getenv("ADMIN_PORT", 5000)))
