@@ -18,7 +18,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db.queries import (
-    get_all_flowers, upsert_flower, delete_flower,
+    get_all_flowers, upsert_flower, delete_flower, get_flower,
+    get_all_vases,  upsert_vase,   delete_vase,   get_vase,
     normalize_rarity, VALID_RARITIES, RARITY_ORDER,
 )
 
@@ -181,6 +182,129 @@ def api_rarities():
 
 
 # ------------------------------------------------------------------
+# VASE API ROUTES  (mirrors flower routes exactly)
+# ------------------------------------------------------------------
+
+@admin_app.route("/api/vases", methods=["GET"])
+@require_login
+def api_get_vases():
+    vases = get_all_vases()
+    vases.sort(key=lambda v: (
+        RARITY_ORDER.get(normalize_rarity(v["rarity"]), 99),
+        v["name"].lower()
+    ))
+    return jsonify(vases)
+
+
+@admin_app.route("/api/vases", methods=["POST"])
+@require_login
+def api_add_vase():
+    data         = request.get_json(silent=True) or {}
+    name         = str(data.get("name", "")).strip()
+    rarity       = str(data.get("rarity", "")).strip()
+    base_points  = data.get("base_points", 0)
+    upgrade_cost = data.get("upgrade_cost", 0)
+    source       = str(data.get("source", "Unknown")).strip()
+
+    if not name:
+        return jsonify({"error": "Vase name is required."}), 400
+    if normalize_rarity(rarity) not in VALID_RARITIES:
+        return jsonify({"error": f"Invalid rarity. Must be one of: {', '.join(sorted(VALID_RARITIES, key=lambda r: RARITY_ORDER.get(r,99)))}"}), 400
+    try:
+        base_points  = int(base_points)
+        upgrade_cost = int(upgrade_cost)
+    except (TypeError, ValueError):
+        return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
+
+    upsert_vase(name, rarity, base_points, upgrade_cost, source)
+    return jsonify({"status": "ok", "name": name})
+
+
+@admin_app.route("/api/vases/<path:name>", methods=["PUT"])
+@require_login
+def api_update_vase(name: str):
+    data     = request.get_json(silent=True) or {}
+    existing = get_vase(name)
+    if not existing:
+        return jsonify({"error": f'Vase "{name}" not found.'}), 404
+
+    rarity       = str(data.get("rarity",       existing["rarity"])).strip()
+    base_points  = data.get("base_points",  existing["base_points"])
+    upgrade_cost = data.get("upgrade_cost", existing["upgrade_cost"])
+    source       = str(data.get("source",   existing["source"])).strip()
+
+    if normalize_rarity(rarity) not in VALID_RARITIES:
+        return jsonify({"error": "Invalid rarity."}), 400
+    try:
+        base_points  = int(base_points)
+        upgrade_cost = int(upgrade_cost)
+    except (TypeError, ValueError):
+        return jsonify({"error": "base_points and upgrade_cost must be integers."}), 400
+
+    upsert_vase(name, rarity, base_points, upgrade_cost, source)
+    return jsonify({"status": "ok", "name": name})
+
+
+@admin_app.route("/api/vases/<path:name>", methods=["DELETE"])
+@require_login
+def api_delete_vase(name: str):
+    deleted = delete_vase(name)
+    if not deleted:
+        return jsonify({"error": f'Vase "{name}" not found.'}), 404
+    return jsonify({"status": "ok", "name": name})
+
+
+@admin_app.route("/api/vases/bulk", methods=["POST"])
+@require_login
+def api_bulk_import_vases():
+    data  = request.get_json(silent=True) or {}
+    rows  = data.get("rows", [])
+    if not rows:
+        return jsonify({"error": "No rows provided."}), 400
+
+    imported = 0
+    skipped  = 0
+    errors   = []
+
+    for i, row in enumerate(rows):
+        name   = str(row.get("name",   "")).strip()
+        rarity = str(row.get("rarity", "")).strip()
+        source = str(row.get("source", "Unknown")).strip() or "Unknown"
+
+        raw_pts  = str(row.get("points",       "")).strip()
+        raw_cost = str(row.get("upgrade_cost", "")).strip()
+
+        try:
+            base_points  = int(float(raw_pts))  if raw_pts  else 0
+        except ValueError:
+            base_points  = 0
+        try:
+            upgrade_cost = int(float(raw_cost)) if raw_cost else 0
+        except ValueError:
+            upgrade_cost = 0
+
+        if not name:
+            skipped += 1
+            continue
+
+        norm = normalize_rarity(rarity)
+        if norm not in VALID_RARITIES:
+            errors.append(f"Row {i+1}: '{name}' has invalid rarity '{rarity}' — skipped.")
+            skipped += 1
+            continue
+
+        upsert_vase(name, norm, base_points, upgrade_cost, source)
+        imported += 1
+
+    return jsonify({
+        "status":   "ok",
+        "imported": imported,
+        "skipped":  skipped,
+        "errors":   errors,
+    })
+
+
+# ------------------------------------------------------------------
 # LOGIN PAGE
 # ------------------------------------------------------------------
 
@@ -297,7 +421,7 @@ input[type=password]:focus{
   background:var(--white);
 }
 
-.card button{
+form button[type=submit]{
   width:100%;padding:13px;border:none;border-radius:10px;
   background:linear-gradient(135deg,var(--pink),#e898b8);
   color:var(--white);font-size:.95rem;font-weight:600;
@@ -305,8 +429,8 @@ input[type=password]:focus{
   box-shadow:0 3px 12px rgba(240,168,192,.4);
   transition:opacity .15s,transform .12s,box-shadow .15s;
 }
-.card button:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 5px 16px rgba(240,168,192,.5)}
-.card button:active{transform:none}
+form button[type=submit]:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 5px 16px rgba(240,168,192,.5)}
+form button[type=submit]:active{transform:none}
 
 .error{
   margin-top:14px;padding:11px 14px;border-radius:9px;
@@ -650,6 +774,13 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
     </div>
 
     <div class="logo-divider"></div>
+    <div class="sidebar-label">Master Lists</div>
+    <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px">
+      <button class="rpill all active" id="tab-flowers" onclick="switchTab('flowers',this)">🌸 Flowers <span class="count" id="tab-cnt-flowers"></span></button>
+      <button class="rpill Basic" id="tab-vases" onclick="switchTab('vases',this)">🏺 Vases <span class="count" id="tab-cnt-vases"></span></button>
+    </div>
+
+    <div class="logo-divider"></div>
     <div class="sidebar-label">Filter by Rarity</div>
     <div class="rarity-pills">
       <button class="rpill all active" onclick="setFilter('all',this)">
@@ -688,8 +819,8 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
         <div style="display:flex;align-items:center;gap:10px">
           <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
           <div>
-            <div style="display:flex;align-items:center;gap:12px"><div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">Flower Master List</div><button class="btn btn-secondary btn-sm" onclick="toggleImport()" id="importToggle">📥 Bulk Import</button></div>
-            <div style="font-size:.78rem;color:var(--text2)">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
+            <div style="display:flex;align-items:center;gap:12px"><div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)" id="bannerTitle">Flower Master List</div><button class="btn btn-secondary btn-sm" onclick="toggleImport()" id="importToggle">📥 Bulk Import</button></div>
+            <div style="font-size:.78rem;color:var(--text2)" id="bannerSub">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
           </div>
         </div>
       </div>
@@ -704,7 +835,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
       <div class="panel-title" id="formTitle">🌱 Add New Flower</div>
       <div class="form-grid">
         <div class="field">
-          <label>Flower Name</label>
+          <label id="nameLbl">Flower Name</label>
           <input id="fName" placeholder="e.g. Moonbloom Rose" maxlength="100"/>
         </div>
         <div class="field">
@@ -825,14 +956,46 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 <script>
 const API = (path) => path;
 
-let flowers      = [];
+let items        = [];
+let activeTab    = 'flowers';
 let activeFilter = 'all';
 let deleteTarget = null;
+
+const TAB_CFG = {
+  flowers: {
+    api:         '/api/flowers',
+    bulkApi:     '/api/flowers/bulk',
+    label:       'Flower',
+    addTitle:    '🌱 Add New Flower',
+    namePh:      'e.g. Moonbloom Rose',
+    bannerTitle: 'Flower Master List',
+    bannerSub:   'Add, edit, and manage flowers for Dreamweaving Garden league events.',
+    icon:        '🌸',
+    addedMsg:    (n) => '🌸 "'+n+'" added to the master list!',
+    updatedMsg:  (n) => '🌿 "'+n+'" updated.',
+    removedMsg:  (n) => '🌺 "'+n+'" removed from the list.',
+  },
+  vases: {
+    api:         '/api/vases',
+    bulkApi:     '/api/vases/bulk',
+    label:       'Vase',
+    addTitle:    '🏺 Add New Vase',
+    namePh:      'e.g. Crystal Bloom Vase',
+    bannerTitle: 'Vase Master List',
+    bannerSub:   'Add, edit, and manage vases for Dreamweaving Garden.',
+    icon:        '🏺',
+    addedMsg:    (n) => '🏺 "'+n+'" added to the master list!',
+    updatedMsg:  (n) => '🏺 "'+n+'" updated.',
+    removedMsg:  (n) => '🏺 "'+n+'" removed from the list.',
+  },
+};
+
+function cfg(){ return TAB_CFG[activeTab]; }
 
 function esc(s){ return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])) }
 function toast(msg,type='ok'){
   const b=document.getElementById('statusBar');
-  b.innerHTML=`<div class="toast ${type}">${esc(msg)}</div>`;
+  b.innerHTML='<div class="toast '+type+'">'+esc(msg)+'</div>';
   setTimeout(()=>{b.innerHTML=''},4500);
 }
 function updateCalc(){
@@ -840,6 +1003,23 @@ function updateCalc(){
   document.getElementById('calcVal').textContent=v?(v*2)+' pts':'—';
 }
 function rarityOrder(r){return({'Shine':0,'Star':1,'Rare':2,'Fine':3,'Basic':4}[r]??9)}
+
+function switchTab(tab, el){
+  activeTab    = tab;
+  activeFilter = 'all';
+  document.querySelectorAll('#tab-flowers,#tab-vases').forEach(b=>b.classList.remove('active','all'));
+  el.classList.add('active','all');
+  // update banner + form labels
+  document.getElementById('bannerTitle').textContent = cfg().bannerTitle;
+  document.getElementById('bannerSub').textContent   = cfg().bannerSub;
+  document.getElementById('nameLbl').textContent      = cfg().label+' Name';
+  document.getElementById('fName').placeholder        = cfg().namePh;
+  resetForm();
+  // reset rarity filter pills to all
+  document.querySelectorAll('.rpill').forEach(p=>p.classList.remove('active'));
+  document.querySelector('.rpill.all').classList.add('active');
+  load();
+}
 
 function setFilter(f,el){
   activeFilter=f;
@@ -850,9 +1030,9 @@ function setFilter(f,el){
 
 async function load(){
   try{
-    const r=await fetch(API('/api/flowers'));
+    const r=await fetch(API(cfg().api));
     if(!r.ok) throw new Error('Session expired — please refresh.');
-    flowers=await r.json();
+    items=await r.json();
     updateSidebar();
     render();
   }catch(e){toast(e.message,'err')}
@@ -860,9 +1040,12 @@ async function load(){
 
 function updateSidebar(){
   const counts={};
-  flowers.forEach(f=>{counts[f.rarity]=(counts[f.rarity]||0)+1});
-  document.getElementById('sTotal').textContent=flowers.length;
-  document.getElementById('cnt-all').textContent=flowers.length;
+  items.forEach(f=>{counts[f.rarity]=(counts[f.rarity]||0)+1});
+  document.getElementById('sTotal').textContent=items.length;
+  document.getElementById('cnt-all').textContent=items.length;
+  document.getElementById('tab-cnt-flowers').textContent='';
+  document.getElementById('tab-cnt-vases').textContent='';
+  document.getElementById('tab-cnt-'+activeTab).textContent=items.length;
   ['Shine','Star','Rare','Fine','Basic'].forEach(r=>{
     const el=document.getElementById('cnt-'+r);
     if(el) el.textContent=counts[r]||0;
@@ -871,81 +1054,69 @@ function updateSidebar(){
 
 function render(){
   const q=document.getElementById('search').value.trim().toLowerCase();
-  let rows=flowers.filter(f=>{
+  let rows=items.filter(f=>{
     const mf=activeFilter==='all'||f.rarity===activeFilter;
     const ms=!q||f.name.toLowerCase().includes(q)||f.source.toLowerCase().includes(q);
     return mf&&ms;
   });
   rows.sort((a,b)=>rarityOrder(a.rarity)-rarityOrder(b.rarity)||a.name.localeCompare(b.name));
-  document.getElementById('countBadge').textContent=`${rows.length} flower${rows.length!==1?'s':''}`;
+  document.getElementById('countBadge').textContent=rows.length+' '+cfg().label.toLowerCase()+(rows.length!==1?'s':'');
   const tbody=document.getElementById('flowerRows');
 
   if(!rows.length){
-    tbody.innerHTML=`<tr><td colspan="7"><div class="empty-state">
-      <div class="icon">🌱</div>
-      <p>${q||activeFilter!=='all'?'No flowers match your search.':'No flowers yet — add your first one above!'}</p>
-    </div></td></tr>`;
+    tbody.innerHTML='<tr><td colspan="7"><div class="empty-state">'
+      +'<div class="icon">'+cfg().icon+'</div>'
+      +'<p>'+(q||activeFilter!=='all'?'No '+cfg().label.toLowerCase()+'s match your search.':'No '+cfg().label.toLowerCase()+'s yet — add your first one above!')+'</p>'
+      +'</div></td></tr>';
     return;
   }
 
-  tbody.innerHTML=rows.map(f=>`
-    <tr id="row-${CSS.escape(f.name)}">
-      <td><span class="flower-name">${esc(f.name)}</span></td>
-      <td><span class="rarity-badge ${esc(f.rarity)}">${esc(f.rarity)}</span></td>
-      <td><span class="pts-base">${f.base_points}</span></td>
-      <td><span class="pts-up">${f.base_points*2}</span></td>
-      <td><span class="diamond">💎</span> ${f.upgrade_cost.toLocaleString()}</td>
-      <td><span class="source-tag">${esc(f.source)}</span></td>
-      <td><div class="actions">
-        <button class="btn btn-success btn-sm" onclick="startEdit(${JSON.stringify(f.name)})">Edit</button>
-        <button class="btn btn-danger btn-sm" onclick="startDelete(${JSON.stringify(f.name)})">Remove</button>
-      </div></td>
-    </tr>
-    <tr class="edit-row" id="edit-${CSS.escape(f.name)}">
-      <td colspan="7">
-        <div class="edit-form">
-          <div class="field">
-            <label>Name (locked)</label>
-            <input value="${esc(f.name)}" disabled style="opacity:.55"/>
-          </div>
-          <div class="field">
-            <label>Rarity</label>
-            <select id="er-${CSS.escape(f.name)}-rarity">
-              ${['Shine','Star','Rare','Fine','Basic'].map(r=>`<option${r===f.rarity?' selected':''}>${r}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field">
-            <label>Base Points</label>
-            <input id="er-${CSS.escape(f.name)}-pts" type="number" min="0" value="${f.base_points}"
-              oninput="updateEditCalc(${JSON.stringify(f.name)})"/>
-          </div>
-          <div class="field">
-            <label>Upgrade Cost 💎</label>
-            <input id="er-${CSS.escape(f.name)}-cost" type="number" min="0" value="${f.upgrade_cost}"/>
-          </div>
-          <div class="field">
-            <label>Source</label>
-            <input id="er-${CSS.escape(f.name)}-source" value="${esc(f.source)}" maxlength="100"/>
-          </div>
-          <div class="field">
-            <label>&nbsp;</label>
-            <div class="btn-group">
-              <button class="btn btn-primary btn-sm" onclick="saveEdit(${JSON.stringify(f.name)})">Save</button>
-              <button class="btn btn-secondary btn-sm" onclick="closeEdit(${JSON.stringify(f.name)})">Cancel</button>
-            </div>
-          </div>
-        </div>
-        <div style="margin-top:10px;font-size:.77rem;color:var(--text2)">
-          Upgraded: <span id="er-${CSS.escape(f.name)}-calc" style="color:var(--wood);font-weight:600">${f.base_points*2} pts</span>
-        </div>
-      </td>
-    </tr>
-  `).join('');
+  tbody.innerHTML=rows.map(function(f){
+    var n=JSON.stringify(f.name);
+    var e=CSS.escape(f.name);
+    var opts=['Shine','Star','Rare','Fine','Basic'].map(function(r){
+      return '<option'+(r===f.rarity?' selected':'')+'>'+r+'</option>';
+    }).join('');
+    return '<tr id="row-'+e+'">'
+      +'<td><span class="flower-name">'+esc(f.name)+'</span></td>'
+      +'<td><span class="rarity-badge '+esc(f.rarity)+'">'+esc(f.rarity)+'</span></td>'
+      +'<td><span class="pts-base">'+f.base_points+'</span></td>'
+      +'<td><span class="pts-up">'+(f.base_points*2)+'</span></td>'
+      +'<td><span class="diamond">💎</span> '+f.upgrade_cost.toLocaleString()+'</td>'
+      +'<td><span class="source-tag">'+esc(f.source)+'</span></td>'
+      +'<td><div class="actions">'
+        +'<button class="btn btn-success btn-sm" onclick="startEdit('+n+')">Edit</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="startDelete('+n+')">Remove</button>'
+      +'</div></td>'
+    +'</tr>'
+    +'<tr class="edit-row" id="edit-'+e+'">'
+      +'<td colspan="7"><div class="edit-form">'
+        +'<div class="field"><label>Name (locked)</label>'
+          +'<input value="'+esc(f.name)+'" disabled style="opacity:.55"/></div>'
+        +'<div class="field"><label>Rarity</label>'
+          +'<select id="er-'+e+'-rarity">'+opts+'</select></div>'
+        +'<div class="field"><label>Base Points</label>'
+          +'<input id="er-'+e+'-pts" type="number" min="0" value="'+f.base_points+'"'
+          +' oninput="updateEditCalc('+n+')"/></div>'
+        +'<div class="field"><label>Upgrade Cost 💎</label>'
+          +'<input id="er-'+e+'-cost" type="number" min="0" value="'+f.upgrade_cost+'"/></div>'
+        +'<div class="field"><label>Source</label>'
+          +'<input id="er-'+e+'-source" value="'+esc(f.source)+'" maxlength="100"/></div>'
+        +'<div class="field"><label>&nbsp;</label><div class="btn-group">'
+          +'<button class="btn btn-primary btn-sm" onclick="saveEdit('+n+')">Save</button>'
+          +'<button class="btn btn-secondary btn-sm" onclick="closeEdit('+n+')">Cancel</button>'
+        +'</div></div>'
+      +'</div>'
+      +'<div style="margin-top:10px;font-size:.77rem;color:var(--text2)">'
+        +'Upgraded: <span id="er-'+e+'-calc" style="color:var(--wood);font-weight:600">'+(f.base_points*2)+' pts</span>'
+      +'</div></td>'
+    +'</tr>';
+  }).join('');
 }
 
 function updateEditCalc(name){
-  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  document.getElementById(`er-${CSS.escape(name)}-calc`).textContent=(pts*2)+' pts';
+  const pts=parseInt(document.getElementById('er-'+CSS.escape(name)+'-pts').value)||0;
+  document.getElementById('er-'+CSS.escape(name)+'-calc').textContent=(pts*2)+' pts';
 }
 
 async function submitForm(){
@@ -954,14 +1125,14 @@ async function submitForm(){
   const pts    =parseInt(document.getElementById('fPoints').value)||0;
   const cost   =parseInt(document.getElementById('fCost').value)||0;
   const source =document.getElementById('fSource').value.trim()||'Unknown';
-  if(!name){toast('Flower name is required.','err');return}
-  const r=await fetch(API('/api/flowers'),{
+  if(!name){toast(cfg().label+' name is required.','err');return}
+  const r=await fetch(API(cfg().api),{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name,rarity,base_points:pts,upgrade_cost:cost,source})
   });
   const d=await r.json();
-  if(!r.ok){toast(d.error||'Error adding flower.','err');return}
-  toast(`🌸 "${name}" added to the master list!`);
+  if(!r.ok){toast(d.error||'Error adding '+cfg().label.toLowerCase()+'.','err');return}
+  toast(cfg().addedMsg(name));
   resetForm();await load();
 }
 
@@ -969,7 +1140,7 @@ function resetForm(){
   ['fName','fPoints','fCost','fSource'].forEach(id=>{document.getElementById(id).value=''});
   document.getElementById('fRarity').value='Basic';
   document.getElementById('calcVal').textContent='—';
-  document.getElementById('formTitle').textContent='🌱 Add New Flower';
+  document.getElementById('formTitle').textContent=cfg().addTitle;
   document.getElementById('btnCancel').style.display='none';
 }
 function cancelEdit(){resetForm()}
@@ -984,23 +1155,23 @@ function closeEdit(name){
   if(row) row.classList.remove('open');
 }
 async function saveEdit(name){
-  const rarity=document.getElementById(`er-${CSS.escape(name)}-rarity`).value;
-  const pts=parseInt(document.getElementById(`er-${CSS.escape(name)}-pts`).value)||0;
-  const cost=parseInt(document.getElementById(`er-${CSS.escape(name)}-cost`).value)||0;
-  const source=document.getElementById(`er-${CSS.escape(name)}-source`).value.trim()||'Unknown';
-  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{
+  const rarity=document.getElementById('er-'+CSS.escape(name)+'-rarity').value;
+  const pts=parseInt(document.getElementById('er-'+CSS.escape(name)+'-pts').value)||0;
+  const cost=parseInt(document.getElementById('er-'+CSS.escape(name)+'-cost').value)||0;
+  const source=document.getElementById('er-'+CSS.escape(name)+'-source').value.trim()||'Unknown';
+  const r=await fetch(API(cfg().api+'/'+encodeURIComponent(name)),{
     method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})
   });
   const d=await r.json();
   if(!r.ok){toast(d.error||'Error saving.','err');return}
-  toast(`🌿 "${name}" updated.`);await load();
+  toast(cfg().updatedMsg(name));await load();
 }
 
 function startDelete(name){
   deleteTarget=name;
   document.getElementById('deleteMsg').textContent=
-    `Remove "${name}" from the master list? Players who have it tracked will keep their record.`;
+    'Remove "'+name+'" from the '+cfg().label.toLowerCase()+' master list? Players who have it tracked will keep their record.';
   document.getElementById('deleteModal').classList.add('open');
 }
 function closeDelete(){
@@ -1010,10 +1181,10 @@ function closeDelete(){
 async function confirmDelete(){
   if(!deleteTarget) return;
   const name=deleteTarget;closeDelete();
-  const r=await fetch(API(`/api/flowers/${encodeURIComponent(name)}`),{method:'DELETE'});
+  const r=await fetch(API(cfg().api+'/'+encodeURIComponent(name)),{method:'DELETE'});
   const d=await r.json();
   if(!r.ok){toast(d.error||'Error removing.','err');return}
-  toast(`🌺 "${name}" removed from the list.`);await load();
+  toast(cfg().removedMsg(name));await load();
 }
 
 document.getElementById('deleteModal').addEventListener('click',e=>{
@@ -1097,7 +1268,7 @@ async function importFromPaste(){
   fill.style.width='10%';
   label.textContent='Importing '+rows.length+' flowers...';
 
-  const r = await fetch(API('/api/flowers/bulk'),{
+  const r = await fetch(API(cfg().bulkApi),{
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({rows: rows})
   });
