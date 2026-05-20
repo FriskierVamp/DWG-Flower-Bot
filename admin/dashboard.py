@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db.queries import (
     get_all_flowers, upsert_flower, delete_flower, get_flower,
-    get_all_vases,  upsert_vase,   delete_vase,   get_vase,
+    get_all_vases,  upsert_master_vase as upsert_vase,   delete_vase,   get_vase,
     normalize_rarity, VALID_RARITIES, RARITY_ORDER,
 )
 
