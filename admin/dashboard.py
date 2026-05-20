@@ -277,10 +277,15 @@ button:active{transform:none}
 <div class="petal" style="left:88%;animation-duration:7.5s;animation-delay:.5s">🌸</div>
 
 <div class="wrap">
-  <div class="banner-art">🌸 🌷 🌿 🌼 🌸</div>
+  <div class="banner-art">
+    <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/login-banner.png" alt="Dreamweaving Garden" style="width:100%;height:100%;object-fit:cover;display:block;"/>
+  </div>
 
   <div class="card">
-    <div class="logo">Dreamweaving <span>Garden</span></div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:4px">
+      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:44px;height:44px;border-radius:50%;border:2px solid var(--pink-mid);box-shadow:0 2px 8px rgba(240,168,192,.3)"/>
+      <div class="logo">Dreamweaving <span>Garden</span></div>
+    </div>
     <div class="tagline">✦ Flower Manager · Admin ✦</div>
 
     <form method="POST" action="/login">
@@ -556,7 +561,10 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 
   <!-- SIDEBAR -->
   <aside class="sidebar">
-    <div class="logo">Dreamweaving <span class="accent">Garden</span></div>
+    <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:4px">
+      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:44px;height:44px;border-radius:50%;border:2px solid var(--pink-mid);box-shadow:0 2px 8px rgba(240,168,192,.3)"/>
+      <div class="logo">Dreamweaving <span class="accent">Garden</span></div>
+    </div>
     <div class="logo-sub">✦ Flower Manager ✦</div>
     <div class="logo-divider"></div>
 
@@ -596,9 +604,19 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
   <main class="main">
 
     <!-- BANNER -->
-    <div class="banner">
-      <div class="banner-title">🌸 Flower Master List</div>
-      <div class="banner-sub">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
+    <div class="banner" style="padding:0;background:none;border:2px solid var(--pink-mid);border-radius:18px;overflow:hidden;box-shadow:0 4px 20px rgba(180,120,80,.12);position:relative;">
+      <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/banner.png" alt="Dreamweaving Garden" style="width:100%;display:block;max-height:180px;object-fit:cover;object-position:center 40%"/>
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 24px;
+        background:linear-gradient(transparent,rgba(253,246,238,.92));
+        border-top:1px solid rgba(240,168,192,.2)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
+          <div>
+            <div style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">Flower Master List</div>
+            <div style="font-size:.78rem;color:var(--text2)">Add, edit, and manage flowers for Dreamweaving Garden league events.</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- STATUS -->
