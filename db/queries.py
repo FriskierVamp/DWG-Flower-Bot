@@ -63,6 +63,16 @@ def remove_player(guild_id: str, discord_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def update_player_ign(guild_id: str, discord_id: str, new_ign: str) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            """UPDATE players SET ign = ?
+               WHERE guild_id = ? AND discord_id = ?""",
+            (new_ign.strip(), str(guild_id), str(discord_id)),
+        )
+        return cur.rowcount > 0
+
+
 # ------------------------------------------------------------------
 # FLOWERS (master list — global, not per-guild)
 # ------------------------------------------------------------------
@@ -163,7 +173,9 @@ def get_player_flowers(guild_id: str, discord_id: str) -> list[str]:
 
 def add_player_flower(guild_id: str, discord_id: str, flower_name: str,
                       source_type: str = "manual", logged_by: str = None) -> bool:
-    """Returns True on success, False if already tracked."""
+    """Returns True on success, False if already tracked OR flower doesn't exist."""
+    if not get_flower(flower_name):
+        return False
     try:
         with get_db() as conn:
             conn.execute(
@@ -216,35 +228,19 @@ def get_guild_missing_flowers(guild_id: str) -> list[str]:
         return [r["name"] for r in rows]
 
 
-# ------------------------------------------------------------------
-# VASES
-# ------------------------------------------------------------------
-
-def get_player_vases(guild_id: str, discord_id: str) -> list[dict]:
+def get_player_missing_flowers(guild_id: str, discord_id: str) -> list[str]:
+    """Return flower names from the master list that this player does not have."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT * FROM vases WHERE guild_id = ? AND discord_id = ?
-               ORDER BY vase_type COLLATE NOCASE""",
+            """SELECT f.name FROM flowers f
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM player_flowers pf
+                   WHERE pf.guild_id = ? AND pf.discord_id = ? AND pf.flower_name = f.name
+               )
+               ORDER BY f.name COLLATE NOCASE""",
             (str(guild_id), str(discord_id)),
         ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def upsert_vase(guild_id: str, discord_id: str, vase_type: str,
-                quantity: int, source_type: str = "manual",
-                logged_by: str = None) -> None:
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO vases (guild_id, discord_id, vase_type, quantity, source_type, logged_by)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(guild_id, discord_id, vase_type) DO UPDATE SET
-                   quantity   = excluded.quantity,
-                   source_type = excluded.source_type,
-                   logged_by  = excluded.logged_by,
-                   updated_at = datetime('now')""",
-            (str(guild_id), str(discord_id), vase_type.strip(),
-             quantity, source_type, logged_by),
-        )
+        return [r["name"] for r in rows]
 
 
 # ------------------------------------------------------------------
@@ -274,6 +270,22 @@ def get_vase(name: str) -> dict | None:
         return dict(row) if row else None
 
 
+def find_vase_match(query: str) -> str | None:
+    """Fuzzy vase name match — exact first, then starts-with, then contains."""
+    query = query.strip().lower()
+    vases = get_all_vases()
+    names = [v["name"] for v in vases]
+
+    exact = next((n for n in names if n.lower() == query), None)
+    if exact:
+        return exact
+    starts = next((n for n in names if n.lower().startswith(query)), None)
+    if starts:
+        return starts
+    contains = next((n for n in names if query in n.lower()), None)
+    return contains
+
+
 def upsert_master_vase(name: str, rarity: str, base_points: int,
                        upgrade_cost: int, source: str) -> None:
     rarity = normalize_rarity(rarity)
@@ -295,6 +307,98 @@ def delete_vase(name: str) -> bool:
     with get_db() as conn:
         cur = conn.execute("DELETE FROM master_vases WHERE LOWER(name) = LOWER(?)", (name.strip(),))
         return cur.rowcount > 0
+
+
+def get_vase_names_for_autocomplete() -> list[str]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT name FROM master_vases ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        return [r["name"] for r in rows]
+
+
+# ------------------------------------------------------------------
+# PLAYER VASES
+# ------------------------------------------------------------------
+
+def get_player_vases(guild_id: str, discord_id: str) -> list[str]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT vase_name FROM player_vases
+               WHERE guild_id = ? AND discord_id = ?
+               ORDER BY vase_name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [r["vase_name"] for r in rows]
+
+
+def add_player_vase(guild_id: str, discord_id: str, vase_name: str,
+                    source_type: str = "manual", logged_by: str = None) -> bool:
+    """Returns True on success, False if already tracked OR vase doesn't exist."""
+    if not get_vase(vase_name):
+        return False
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO player_vases
+                   (guild_id, discord_id, vase_name, source_type, logged_by)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (str(guild_id), str(discord_id), vase_name, source_type, logged_by),
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def remove_player_vase(guild_id: str, discord_id: str, vase_name: str) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            """DELETE FROM player_vases
+               WHERE guild_id = ? AND discord_id = ? AND vase_name = ?""",
+            (str(guild_id), str(discord_id), vase_name),
+        )
+        return cur.rowcount > 0
+
+
+def get_players_with_vase(guild_id: str, vase_name: str) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT p.discord_id, p.ign, p.discord_name
+               FROM player_vases pv
+               JOIN players p ON p.guild_id = pv.guild_id AND p.discord_id = pv.discord_id
+               WHERE pv.guild_id = ? AND pv.vase_name = ?
+               ORDER BY p.ign COLLATE NOCASE""",
+            (str(guild_id), vase_name),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_guild_missing_vases(guild_id: str) -> list[str]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT mv.name FROM master_vases mv
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM player_vases pv
+                   WHERE pv.guild_id = ? AND pv.vase_name = mv.name
+               )
+               ORDER BY mv.name COLLATE NOCASE""",
+            (str(guild_id),),
+        ).fetchall()
+        return [r["name"] for r in rows]
+
+
+def get_player_missing_vases(guild_id: str, discord_id: str) -> list[str]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT mv.name FROM master_vases mv
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM player_vases pv
+                   WHERE pv.guild_id = ? AND pv.discord_id = ? AND pv.vase_name = mv.name
+               )
+               ORDER BY mv.name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [r["name"] for r in rows]
 
 
 # ------------------------------------------------------------------
@@ -429,3 +533,13 @@ def get_guild_league_state(guild_id: str, week_start: str) -> list[dict]:
             (str(guild_id), week_start),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def reset_league_week(guild_id: str, week_start: str) -> int:
+    """Wipe all league state for the given week. Returns rows deleted."""
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM league_state WHERE guild_id = ? AND week_start = ?",
+            (str(guild_id), week_start),
+        )
+        return cur.rowcount

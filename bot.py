@@ -50,18 +50,21 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """Auto-assign the Seedling role when someone joins."""
-    from db.queries import get_guild_config
+    """Auto-assign the 'New' role when someone joins."""
+    from db.schema import get_guild_config
     cfg = get_guild_config(str(member.guild.id))
-    if not cfg or not cfg.get("seedling_role_id"):
+    if not cfg or not cfg.get("new_role_id"):
         return
-    role = member.guild.get_role(int(cfg["seedling_role_id"]))
+    try:
+        role = member.guild.get_role(int(cfg["new_role_id"]))
+    except (ValueError, TypeError):
+        return
     if role:
         try:
-            await member.add_roles(role, reason="Auto-assigned Seedling on join")
-            log.info("Assigned Seedling to %s in %s", member, member.guild)
+            await member.add_roles(role, reason="Auto-assigned New role on join")
+            log.info("Assigned New role to %s in %s", member, member.guild)
         except discord.Forbidden:
-            log.warning("Missing permission to assign Seedling in %s", member.guild)
+            log.warning("Missing permission to assign New role in %s", member.guild)
 
 
 @bot.event
@@ -91,19 +94,19 @@ async def on_app_command_error(
 # ── Register all commands ──────────────────────────────────────────
 from commands.setup    import register_setup
 from commands.register import register_register
-from commands.track    import register_track
-from commands.add      import register_add
+from commands.my       import register_my
 from commands.lookup   import register_lookup
 from commands.league   import register_league
 from commands.admin    import register_admin
+from commands.help     import register_help
 
 register_setup(tree)
 register_register(tree)
-register_track(tree)
-register_add(tree)
+register_my(tree)
 register_lookup(tree)
 register_league(tree)
 register_admin(tree)
+register_help(tree)
 
 
 # ── DB + Dashboard + Run ───────────────────────────────────────────

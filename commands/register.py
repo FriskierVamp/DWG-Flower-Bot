@@ -1,7 +1,7 @@
 """
 commands/register.py
 Dreamweaving Garden Bot — /register command
-Modal form → DB insert → role swap (New → Member).
+Modal form → DB insert → role swap (New → Member) → welcome post in same channel.
 """
 
 import discord
@@ -61,23 +61,11 @@ class RegisterModal(discord.ui.Modal, title="Register for Dreamweaving Garden"):
 
         new_role_id    = cfg.get("new_role_id")
         member_role_id = cfg.get("member_role_id")
+        member         = interaction.user
 
-        # 3 — Verify member has the New role (safety net)
-        member = interaction.user
-        has_new_role = any(
-            str(r.id) == str(new_role_id) for r in member.roles
-        ) if new_role_id else False
-
-        if new_role_id and not has_new_role:
-            # They don't have the New role — flag it but still register them
-            # Leaders are notified via the log channel
-            flag_admin = True
-        else:
-            flag_admin = False
-
-        # 4 — Write to DB
+        # 3 — Write to DB
         success = register_player(
-            guild_id, discord_id, interaction.user.display_name, ign_value
+            guild_id, discord_id, member.display_name, ign_value
         )
         if not success:
             await interaction.response.send_message(
@@ -90,7 +78,7 @@ class RegisterModal(discord.ui.Modal, title="Register for Dreamweaving Garden"):
             )
             return
 
-        # 5 — Role swap: remove New, assign Member
+        # 4 — Role swap: remove New, assign Member
         swap_status = ""
         try:
             new_role    = interaction.guild.get_role(int(new_role_id))    if new_role_id    else None
@@ -100,52 +88,25 @@ class RegisterModal(discord.ui.Modal, title="Register for Dreamweaving Garden"):
                 await member.remove_roles(new_role, reason="DWG registration")
             if member_role:
                 await member.add_roles(member_role, reason="DWG registration")
-            swap_status = f"✅ Role updated to <@&{member_role_id}>"
+                swap_status = f"\n✅ Role updated to <@&{member_role_id}>"
         except discord.Forbidden:
-            swap_status = "⚠️ Bot lacks permission to manage roles — ask an admin to fix this."
+            swap_status = "\n⚠️ Bot lacks permission to manage roles — ask an admin to fix this."
         except Exception as e:
-            swap_status = f"⚠️ Role swap failed: {e}"
+            swap_status = f"\n⚠️ Role swap failed: {e}"
 
-        # 6 — Confirm to user
+        # 5 — Public welcome in the channel where /register was used
         await interaction.response.send_message(
             embed=discord.Embed(
                 title="🌸 Welcome to the Garden!",
                 description=(
-                    f"You're now registered as **{ign_value}**.\n\n"
+                    f"{member.mention} is now registered as **{ign_value}**."
                     f"{swap_status}\n\n"
-                    "You can now track flowers, check league standings, and more.\n"
                     "Use `/help` to see what's available."
                 ),
                 color=DWG_MINT,
             ),
             ephemeral=False,
         )
-
-        # 7 — Post to log channel + flag admin if needed
-        log_channel_id = cfg.get("log_channel_id")
-        if log_channel_id:
-            log_channel = interaction.guild.get_channel(int(log_channel_id))
-            if log_channel:
-                log_embed = discord.Embed(
-                    title="🌱 New Member Registered",
-                    description=(
-                        f"**Player:** {member.mention}\n"
-                        f"**In-Game Name:** {ign_value}\n"
-                        f"**Discord:** {interaction.user.display_name}"
-                    ),
-                    color=DWG_MINT,
-                )
-                if flag_admin:
-                    log_embed.add_field(
-                        name="⚠️ Flag for Leaders",
-                        value=(
-                            "This player registered without the expected **New** role. "
-                            "Please verify their role assignment."
-                        ),
-                        inline=False,
-                    )
-                    log_embed.color = DWG_PINK
-                await log_channel.send(embed=log_embed)
 
 
 # ------------------------------------------------------------------

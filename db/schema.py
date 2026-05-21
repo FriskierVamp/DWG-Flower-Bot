@@ -6,6 +6,7 @@ All tables include guild_id so the bot can serve multiple servers cleanly.
 
 import sqlite3
 import os
+import json
 import logging
 
 log = logging.getLogger("dwg.db")
@@ -29,11 +30,9 @@ def init_db() -> None:
 
     # ------------------------------------------------------------------
     # GUILD CONFIG
-    # Stores per-server settings set during /setup.
-    # leader_role_ids: JSON array of Discord role IDs that grant leader access.
-    # new_role_id / member_role_id: the two roles swapped on /register.
-    # log_channel_id: channel where screenshot logs are posted publicly.
-    # setup_complete: 0/1 flag — bot refuses most commands until this is 1.
+    # Per-server settings written by /setup.
+    # No channel config — every command posts in the channel it was run in.
+    # A guild is considered "set up" when leader_role_ids is non-empty.
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS guild_config (
@@ -42,8 +41,6 @@ def init_db() -> None:
         leader_role_ids TEXT NOT NULL DEFAULT '[]',
         new_role_id     TEXT,
         member_role_id  TEXT,
-        log_channel_id  TEXT,
-        setup_complete  INTEGER NOT NULL DEFAULT 0,
         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
     )
@@ -51,9 +48,6 @@ def init_db() -> None:
 
     # ------------------------------------------------------------------
     # PLAYERS
-    # One row per registered player per guild.
-    # discord_id: the user's permanent Discord snowflake ID.
-    # ign: in-game name supplied at /register.
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS players (
@@ -70,11 +64,7 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_players_discord ON players(guild_id, discord_id)")
 
     # ------------------------------------------------------------------
-    # MASTER FLOWER LIST
-    # Global — not per-guild. Managed via the Flask admin dashboard.
-    # upgraded_points is always base_points * 2; stored for query convenience.
-    # upgrade_cost is in diamonds.
-    # rarity: Basic, Fine, Rare, Star, Shine (title case, normalized on insert)
+    # MASTER FLOWER LIST (global, managed via dashboard)
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS flowers (
@@ -92,9 +82,7 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flowers_rarity ON flowers(rarity)")
 
     # ------------------------------------------------------------------
-    # MASTER VASE LIST
-    # Global — not per-guild. Managed via the Flask admin dashboard.
-    # Mirrors the flowers table structure.
+    # MASTER VASE LIST (global, managed via dashboard)
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS master_vases (
@@ -113,8 +101,6 @@ def init_db() -> None:
 
     # ------------------------------------------------------------------
     # PLAYER FLOWERS
-    # Tracks which flowers each player owns.
-    # source_type: 'screenshot' or 'manual' — how the entry was created.
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS player_flowers (
@@ -134,29 +120,27 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pf_flower ON player_flowers(flower_name)")
 
     # ------------------------------------------------------------------
-    # VASES
-    # Per-player vase inventory per guild.
+    # PLAYER VASES — mirrors player_flowers
     # ------------------------------------------------------------------
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS vases (
+    CREATE TABLE IF NOT EXISTS player_vases (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         guild_id        TEXT NOT NULL,
         discord_id      TEXT NOT NULL,
-        vase_type       TEXT NOT NULL,
-        quantity        INTEGER NOT NULL DEFAULT 1,
+        vase_name       TEXT NOT NULL,
         source_type     TEXT NOT NULL DEFAULT 'manual',
         logged_by       TEXT,
         logged_at       TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        UNIQUE(guild_id, discord_id, vase_name),
+        FOREIGN KEY(vase_name) REFERENCES master_vases(name) ON UPDATE CASCADE
     )
     """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_vases_guild ON vases(guild_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_vases_player ON vases(guild_id, discord_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_pv_guild ON player_vases(guild_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_pv_player ON player_vases(guild_id, discord_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_pv_vase ON player_vases(vase_name)")
 
     # ------------------------------------------------------------------
     # LEAGUE LOG
-    # Tracks league standing snapshots per player per season.
-    # Multiple entries allowed — each screenshot/manual entry is a new row.
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS league_log (
@@ -177,8 +161,6 @@ def init_db() -> None:
 
     # ------------------------------------------------------------------
     # CONTRIBUTIONS
-    # Tracks contribution entries per player.
-    # amount: numeric contribution value from the game.
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS contributions (
@@ -197,10 +179,7 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_contrib_player ON contributions(guild_id, discord_id)")
 
     # ------------------------------------------------------------------
-    # LEAGUE COMPETITION STATE
-    # Tracks per-player state during an active league event week.
-    # Replaces TCF's comp_locked / comp_stats JSON blob.
-    # flowers_used: JSON array of flower names used this week.
+    # LEAGUE COMPETITION STATE (weekly event tracking)
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS league_state (
@@ -222,7 +201,7 @@ def init_db() -> None:
 
 
 # ------------------------------------------------------------------
-# HELPER — guild config accessors
+# GUILD CONFIG HELPERS
 # ------------------------------------------------------------------
 
 def get_guild_config(guild_id: str) -> dict | None:
@@ -234,12 +213,11 @@ def get_guild_config(guild_id: str) -> dict | None:
 
 
 def is_setup_complete(guild_id: str) -> bool:
-    cfg = get_guild_config(str(guild_id))
-    return bool(cfg and cfg.get("setup_complete"))
+    """A guild is set up once leader roles are configured."""
+    return bool(get_leader_role_ids(str(guild_id)))
 
 
 def get_leader_role_ids(guild_id: str) -> list[int]:
-    import json
     cfg = get_guild_config(str(guild_id))
     if not cfg:
         return []
@@ -251,7 +229,6 @@ def get_leader_role_ids(guild_id: str) -> list[int]:
 
 def upsert_guild_config(guild_id: str, **kwargs) -> None:
     """Insert or update specific guild config fields."""
-    import json
     cfg = get_guild_config(str(guild_id))
 
     # Serialize list fields

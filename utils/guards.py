@@ -5,14 +5,12 @@ Reusable checks for leader roles, server setup, and registration status.
 """
 
 import discord
-from db.schema import get_guild_config, get_leader_role_ids
+from db.schema import get_guild_config, get_leader_role_ids, is_setup_complete
 
 
 # ------------------------------------------------------------------
 # SETUP GUARD
-# Blocks commands in servers that haven't run /setup yet.
-# A guild is considered set up when it has a log_channel_id saved,
-# which is only written at the end of the 3-step /setup wizard.
+# A guild is considered set up once it has leader roles configured.
 # ------------------------------------------------------------------
 
 async def reject_if_not_setup(interaction: discord.Interaction) -> bool:
@@ -24,18 +22,13 @@ async def reject_if_not_setup(interaction: discord.Interaction) -> bool:
         )
         return True
 
-    cfg = get_guild_config(str(interaction.guild_id))
-    # Treat as set up if we have a log channel (written last in the wizard)
-    # or if setup_complete flag is set (legacy)
-    is_configured = cfg and (cfg.get("log_channel_id") or cfg.get("setup_complete"))
-
-    if not is_configured:
+    if not is_setup_complete(str(interaction.guild_id)):
         await interaction.response.send_message(
             embed=discord.Embed(
                 title="⚙️ Server Not Configured",
                 description=(
                     "This server hasn't finished bot setup yet.\n\n"
-                    "A server admin needs to run `/setup` first to configure roles and channels.\n"
+                    "A server admin needs to run `/setup` first to configure roles.\n"
                     "The wizard will walk through everything step by step."
                 ),
                 color=discord.Color(0xFFB3C1),
@@ -65,12 +58,11 @@ async def reject_if_not_in_server(interaction: discord.Interaction) -> bool:
 def is_leader(interaction: discord.Interaction) -> bool:
     """
     Returns True if the user holds at least one configured leader role.
-    Falls back to server administrator permission if no roles are configured yet.
+    Server administrators always pass.
     """
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         return False
 
-    # Server admins always pass
     if interaction.user.guild_permissions.administrator:
         return True
 
