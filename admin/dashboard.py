@@ -942,7 +942,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 <!-- DELETE MODAL -->
 <div class="modal-overlay" id="deleteModal">
   <div class="modal">
-    <h3>🌺 Remove Flower?</h3>
+    <h3 id="deleteTitle">🌺 Remove Item?</h3>
     <p id="deleteMsg"></p>
     <div class="btn-group">
       <button class="btn btn-secondary" onclick="closeDelete()">Keep It</button>
@@ -1084,7 +1084,7 @@ function render(){
       +'<td><span class="source-tag">'+esc(f.source)+'</span></td>'
       +'<td><div class="actions">'
         +'<button class="btn btn-success btn-sm" onclick="startEdit(\''+i+'\')">Edit</button>'
-        +'<button class="btn btn-danger btn-sm" onclick="startDelete('+n+')">Remove</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="startDelete(\''+esc(f.name).replace(/'/g,"\\'")+'\')">Remove</button>'
       +'</div></td>'
     +'</tr>'
     +'<tr class="edit-row" id="edit-'+i+'">'
@@ -1168,8 +1168,11 @@ async function saveEdit(id, name){
 
 function startDelete(name){
   deleteTarget=name;
+  const label=cfg().label;
+  const icon=activeTab==='flowers'?'🌺':'🏺';
+  document.getElementById('deleteTitle').textContent=icon+' Remove '+label+'?';
   document.getElementById('deleteMsg').textContent=
-    'Remove "'+name+'" from the '+cfg().label.toLowerCase()+' master list? Players who have it tracked will keep their record.';
+    'Remove "'+name+'" from the '+label.toLowerCase()+' master list? Players who have it tracked will keep their record.';
   document.getElementById('deleteModal').classList.add('open');
 }
 function closeDelete(){
