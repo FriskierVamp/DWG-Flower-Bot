@@ -315,7 +315,9 @@ def api_get_servers():
     from db.queries import get_all_players
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT guild_id, guild_name, log_channel_id, created_at FROM guild_config ORDER BY guild_name COLLATE NOCASE"
+            """SELECT guild_id, guild_name, created_at, updated_at
+               FROM guild_config
+               ORDER BY guild_name COLLATE NOCASE"""
         ).fetchall()
     servers = []
     for r in rows:
@@ -325,20 +327,144 @@ def api_get_servers():
     return jsonify(servers)
 
 
+@admin_app.route("/api/servers/<guild_id>", methods=["GET"])
+@require_login
+def api_get_server_detail(guild_id: str):
+    """Full server detail: config + activity stats."""
+    import json as _json
+    from db.schema  import get_db, get_guild_config
+    from db.queries import get_all_players
+
+    cfg = get_guild_config(guild_id)
+    if not cfg:
+        return jsonify({"error": "Server not found"}), 404
+
+    # Parse leader role IDs (stored as JSON array of strings)
+    try:
+        leader_role_ids = _json.loads(cfg.get("leader_role_ids", "[]") or "[]")
+    except (ValueError, TypeError):
+        leader_role_ids = []
+
+    # Activity stats
+    with get_db() as conn:
+        flower_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM player_flowers WHERE guild_id = ?",
+            (str(guild_id),),
+        ).fetchone()["c"]
+        vase_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM player_vases WHERE guild_id = ?",
+            (str(guild_id),),
+        ).fetchone()["c"]
+        contrib_row = conn.execute(
+            """SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
+               FROM contributions WHERE guild_id = ?""",
+            (str(guild_id),),
+        ).fetchone()
+        league_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM league_log WHERE guild_id = ?",
+            (str(guild_id),),
+        ).fetchone()["c"]
+        latest_season_row = conn.execute(
+            """SELECT season FROM league_log
+               WHERE guild_id = ? AND season IS NOT NULL
+               ORDER BY logged_at DESC LIMIT 1""",
+            (str(guild_id),),
+        ).fetchone()
+        latest_register_row = conn.execute(
+            """SELECT registered_at FROM players
+               WHERE guild_id = ? ORDER BY registered_at DESC LIMIT 1""",
+            (str(guild_id),),
+        ).fetchone()
+
+    return jsonify({
+        "guild_id":        cfg["guild_id"],
+        "guild_name":      cfg.get("guild_name") or "",
+        "leader_role_ids": [str(r) for r in leader_role_ids],
+        "new_role_id":     cfg.get("new_role_id")    or "",
+        "member_role_id":  cfg.get("member_role_id") or "",
+        "created_at":      cfg.get("created_at"),
+        "updated_at":      cfg.get("updated_at"),
+        "stats": {
+            "member_count":          len(get_all_players(guild_id)),
+            "flowers_tracked":       flower_count,
+            "vases_tracked":         vase_count,
+            "contributions_logged":  contrib_row["n"],
+            "contributions_total":   contrib_row["total"],
+            "league_entries":        league_count,
+            "latest_season":         (latest_season_row["season"] if latest_season_row else None),
+            "latest_registration":   (latest_register_row["registered_at"][:10] if latest_register_row else None),
+        },
+    })
+
+
+@admin_app.route("/api/servers/<guild_id>/config", methods=["PUT"])
+@require_login
+def api_update_server_config(guild_id: str):
+    """Update editable guild_config fields. Only role-related fields are editable."""
+    from db.schema import get_guild_config, upsert_guild_config
+
+    if not get_guild_config(guild_id):
+        return jsonify({"error": "Server not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+
+    # Whitelist: only these fields are editable from the dashboard
+    updates = {}
+
+    # Leader roles — accept list of strings, validate each is digits
+    if "leader_role_ids" in data:
+        raw = data["leader_role_ids"]
+        if not isinstance(raw, list):
+            return jsonify({"error": "leader_role_ids must be a list"}), 400
+        cleaned = []
+        for item in raw:
+            s = str(item).strip()
+            if not s:
+                continue
+            if not s.isdigit():
+                return jsonify({"error": f"Invalid role ID: {s}"}), 400
+            cleaned.append(s)
+        if not cleaned:
+            return jsonify({"error": "At least one leader role is required"}), 400
+        updates["leader_role_ids"] = cleaned  # upsert serializes lists to JSON
+
+    # New role + member role — single role ID each, must be digits
+    for key in ("new_role_id", "member_role_id"):
+        if key in data:
+            v = str(data[key]).strip()
+            if v and not v.isdigit():
+                return jsonify({"error": f"Invalid role ID for {key}: {v}"}), 400
+            updates[key] = v or None
+
+    # Sanity: new_role and member_role must differ if both set
+    new_id = updates.get("new_role_id")
+    mem_id = updates.get("member_role_id")
+    if new_id and mem_id and new_id == mem_id:
+        return jsonify({"error": "'New' role and 'Member' role must be different"}), 400
+
+    if not updates:
+        return jsonify({"status": "noop"}), 200
+
+    upsert_guild_config(guild_id, **updates)
+    return jsonify({"status": "ok"})
+
+
 @admin_app.route("/api/servers/<guild_id>/members", methods=["GET"])
 @require_login
 def api_get_server_members(guild_id: str):
-    from db.queries import get_all_players, get_player_flowers
+    from db.queries import get_all_players, get_player_flowers, get_player_vases
     players = get_all_players(guild_id)
     result = []
     for p in players:
         flowers = get_player_flowers(guild_id, p["discord_id"])
+        vases   = get_player_vases(guild_id, p["discord_id"])
         result.append({
             "discord_id":    p["discord_id"],
             "discord_name":  p.get("discord_name", ""),
             "ign":           p["ign"],
             "registered_at": p["registered_at"][:10],
             "flower_count":  len(flowers),
+            "vase_count":    len(vases),
         })
     return jsonify(result)
 
@@ -744,6 +870,12 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
 .empty-state .icon{font-size:2.5rem;margin-bottom:10px;opacity:.5}
 .empty-state p{font-size:.88rem}
 
+/* ── MINI STATS (server detail) ── */
+.mini-stat{background:#fff;border:1.5px solid var(--pink-mid);border-radius:10px;
+  padding:12px 10px;text-align:center}
+.mini-stat-val{font-family:var(--font-d);font-size:1.4rem;font-weight:700;color:var(--text);line-height:1.1}
+.mini-stat-lbl{font-size:.68rem;color:var(--text2);margin-top:4px;text-transform:uppercase;letter-spacing:.04em}
+
 /* ── INLINE EDIT ── */
 .edit-row{display:none}
 .edit-row.open{display:table-row}
@@ -1046,8 +1178,8 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
         </div>
       </div>
 
-      <!-- MEMBER LIST VIEW (shown when a server is clicked) -->
-      <div id="memberListView" style="display:none">
+      <!-- SERVER DETAIL VIEW (shown when a server is clicked) -->
+      <div id="serverDetailView" style="display:none">
         <div style="margin-top:16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
           <button class="btn btn-secondary btn-sm" onclick="showServerList()">← Back to Servers</button>
           <div>
@@ -1055,7 +1187,60 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
             <div style="font-size:.78rem;color:var(--text2)" id="memberServerSub"></div>
           </div>
         </div>
-        <div class="table-wrap">
+
+        <!-- ── CONFIGURATION (editable) ────────────────────────── -->
+        <div class="card" style="margin-top:8px;padding:20px;border:2px solid var(--pink-mid);border-radius:14px;background:var(--cream)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <h3 style="font-family:var(--font-d);font-size:1.05rem;color:var(--text);margin:0">⚙️ Configuration</h3>
+            <span style="font-size:.72rem;color:var(--text2)">Role IDs — get these in Discord by right-clicking a role → Copy ID (Developer Mode on)</span>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div>
+              <label style="display:block;font-size:.78rem;font-weight:600;color:var(--text);margin-bottom:4px">'New' Role ID</label>
+              <input type="text" id="cfgNewRole" placeholder="e.g. 1234567890123456789" style="width:100%;padding:8px 10px;border:1.5px solid var(--pink-mid);border-radius:8px;font-family:monospace;font-size:.85rem;background:#fff"/>
+              <div style="font-size:.7rem;color:var(--text2);margin-top:3px">Role given to players before they /register</div>
+            </div>
+            <div>
+              <label style="display:block;font-size:.78rem;font-weight:600;color:var(--text);margin-bottom:4px">'Member' Role ID</label>
+              <input type="text" id="cfgMemberRole" placeholder="e.g. 1234567890123456789" style="width:100%;padding:8px 10px;border:1.5px solid var(--pink-mid);border-radius:8px;font-family:monospace;font-size:.85rem;background:#fff"/>
+              <div style="font-size:.7rem;color:var(--text2);margin-top:3px">Role assigned after /register completes</div>
+            </div>
+          </div>
+
+          <div style="margin-top:14px">
+            <label style="display:block;font-size:.78rem;font-weight:600;color:var(--text);margin-bottom:4px">Leader Role IDs <span style="color:var(--text2);font-weight:400">(one per line, at least 1)</span></label>
+            <textarea id="cfgLeaderRoles" rows="4" placeholder="1234567890123456789&#10;9876543210987654321" style="width:100%;padding:8px 10px;border:1.5px solid var(--pink-mid);border-radius:8px;font-family:monospace;font-size:.85rem;background:#fff;resize:vertical"></textarea>
+            <div style="font-size:.7rem;color:var(--text2);margin-top:3px">Roles with access to /admin commands. Server administrators always pass regardless.</div>
+          </div>
+
+          <div class="btn-group" style="margin-top:16px;justify-content:flex-end">
+            <button class="btn btn-secondary btn-sm" onclick="resetConfigEdits()">Reset</button>
+            <button class="btn btn-primary btn-sm" onclick="saveServerConfig()">💾 Save Changes</button>
+          </div>
+        </div>
+
+        <!-- ── ACTIVITY STATS (read-only) ──────────────────────── -->
+        <div class="card" style="margin-top:14px;padding:18px;border:2px solid var(--pink-mid);border-radius:14px;background:var(--cream)">
+          <h3 style="font-family:var(--font-d);font-size:1.05rem;color:var(--text);margin:0 0 12px 0">📊 Activity</h3>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+            <div class="mini-stat"><div class="mini-stat-val" id="statMembers">—</div><div class="mini-stat-lbl">Members</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statFlowers">—</div><div class="mini-stat-lbl">🌸 Flowers Tracked</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statVases">—</div><div class="mini-stat-lbl">🏺 Vases Tracked</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statLeague">—</div><div class="mini-stat-lbl">League Entries</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statContribN">—</div><div class="mini-stat-lbl">Contributions</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statContribTotal">—</div><div class="mini-stat-lbl">Total Contributed</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statSeason">—</div><div class="mini-stat-lbl">Latest Season</div></div>
+            <div class="mini-stat"><div class="mini-stat-val" id="statLatestReg">—</div><div class="mini-stat-lbl">Latest Register</div></div>
+          </div>
+          <div style="font-size:.7rem;color:var(--text2);margin-top:10px" id="statMetaRow"></div>
+        </div>
+
+        <!-- ── MEMBERS ─────────────────────────────────────────── -->
+        <div style="margin-top:14px;display:flex;align-items:center;justify-content:space-between">
+          <h3 style="font-family:var(--font-d);font-size:1.05rem;color:var(--text);margin:0">👥 Registered Members</h3>
+        </div>
+        <div class="table-wrap" style="margin-top:8px">
           <table>
             <thead>
               <tr>
@@ -1063,6 +1248,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
                 <th>Discord Name</th>
                 <th>Discord ID</th>
                 <th>🌸 Flowers</th>
+                <th>🏺 Vases</th>
                 <th>Registered</th>
               </tr>
             </thead>
@@ -1196,47 +1382,157 @@ function renderServerList(servers){
       +'<td style="font-size:.78rem;color:var(--text2);font-family:monospace">'+esc(s.guild_id)+'</td>'
       +'<td><span class="pts-base">'+s.member_count+'</span></td>'
       +'<td style="font-size:.82rem;color:var(--text2)">'+joined+'</td>'
-      +'<td><button class="btn btn-secondary btn-sm" onclick="loadMembers(\''+esc(s.guild_id)+'\',\''+esc(name)+'\','+s.member_count+')">View Members</button></td>'
+      +'<td><button class="btn btn-secondary btn-sm" onclick="loadServerDetail(\''+esc(s.guild_id)+'\',\''+esc(name)+'\')">View</button></td>'
       +'</tr>';
   }).join('');
 }
 
-async function loadMembers(guildId, guildName, count){
+// Holds the currently-viewed server's data so Reset can restore form fields
+let currentServer = null;
+
+async function loadServerDetail(guildId, guildName){
   document.getElementById('memberServerName').textContent = guildName;
-  document.getElementById('memberServerSub').textContent  = count+' registered member'+(count!==1?'s':'');
+  document.getElementById('memberServerSub').textContent  = 'Loading…';
   document.getElementById('serversBannerTitle').textContent = '🌿 '+guildName;
-  document.getElementById('serversBannerSub').textContent   = count+' registered member'+(count!==1?'s':'');
-  document.getElementById('serverListView').style.display = 'none';
-  document.getElementById('memberListView').style.display = '';
-  const tbody = document.getElementById('memberRows');
-  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text2)">Loading…</td></tr>';
+  document.getElementById('serversBannerSub').textContent   = 'Loading…';
+  document.getElementById('serverListView').style.display   = 'none';
+  document.getElementById('serverDetailView').style.display = '';
+
+  // Clear stats + members while loading
+  ['statMembers','statFlowers','statVases','statLeague','statContribN','statContribTotal','statSeason','statLatestReg']
+    .forEach(id => { document.getElementById(id).textContent = '—'; });
+  document.getElementById('statMetaRow').textContent = '';
+  document.getElementById('memberRows').innerHTML =
+    '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text2)">Loading…</td></tr>';
+
   try{
-    const r = await fetch('/api/servers/'+encodeURIComponent(guildId)+'/members');
-    if(!r.ok) throw new Error('Failed to load members');
-    const members = await r.json();
+    const [dRes, mRes] = await Promise.all([
+      fetch('/api/servers/'+encodeURIComponent(guildId)),
+      fetch('/api/servers/'+encodeURIComponent(guildId)+'/members'),
+    ]);
+    if(!dRes.ok) throw new Error('Failed to load server config');
+    if(!mRes.ok) throw new Error('Failed to load members');
+    const detail  = await dRes.json();
+    const members = await mRes.json();
+
+    currentServer = { guild_id: guildId, name: guildName, snapshot: detail };
+
+    // Header
+    const cnt = detail.stats.member_count;
+    document.getElementById('memberServerSub').textContent  = cnt+' registered member'+(cnt!==1?'s':'');
+    document.getElementById('serversBannerSub').textContent = cnt+' registered member'+(cnt!==1?'s':'');
+
+    // Config fields
+    fillConfigFields(detail);
+
+    // Stats
+    document.getElementById('statMembers').textContent      = detail.stats.member_count;
+    document.getElementById('statFlowers').textContent      = detail.stats.flowers_tracked;
+    document.getElementById('statVases').textContent        = detail.stats.vases_tracked;
+    document.getElementById('statLeague').textContent       = detail.stats.league_entries;
+    document.getElementById('statContribN').textContent     = detail.stats.contributions_logged;
+    document.getElementById('statContribTotal').textContent = (detail.stats.contributions_total||0).toLocaleString();
+    document.getElementById('statSeason').textContent       = detail.stats.latest_season || '—';
+    document.getElementById('statLatestReg').textContent    = detail.stats.latest_registration || '—';
+
+    const meta = [];
+    if(detail.created_at) meta.push('Configured: '+detail.created_at.slice(0,10));
+    if(detail.updated_at) meta.push('Last update: '+detail.updated_at.slice(0,10));
+    meta.push('Guild ID: '+detail.guild_id);
+    document.getElementById('statMetaRow').textContent = meta.join('  ·  ');
+
+    // Members table
+    const tbody = document.getElementById('memberRows');
     if(!members.length){
-      tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">🌱</div><p>No members registered yet.</p></div></td></tr>';
-      return;
+      tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">🌱</div><p>No members registered yet.</p></div></td></tr>';
+    } else {
+      tbody.innerHTML = members.map(function(m){
+        return '<tr>'
+          +'<td><strong>'+esc(m.ign)+'</strong></td>'
+          +'<td style="color:var(--text2)">'+esc(m.discord_name||'—')+'</td>'
+          +'<td style="font-size:.78rem;color:var(--text2);font-family:monospace">'+esc(m.discord_id)+'</td>'
+          +'<td><span class="pts-base">'+m.flower_count+'</span></td>'
+          +'<td><span class="pts-base">'+(m.vase_count||0)+'</span></td>'
+          +'<td style="font-size:.82rem;color:var(--text2)">'+esc(m.registered_at)+'</td>'
+          +'</tr>';
+      }).join('');
     }
-    tbody.innerHTML = members.map(function(m){
-      return '<tr>'
-        +'<td><strong>'+esc(m.ign)+'</strong></td>'
-        +'<td style="color:var(--text2)">'+esc(m.discord_name||'—')+'</td>'
-        +'<td style="font-size:.78rem;color:var(--text2);font-family:monospace">'+esc(m.discord_id)+'</td>'
-        +'<td><span class="pts-base">'+m.flower_count+'</span></td>'
-        +'<td style="font-size:.82rem;color:var(--text2)">'+esc(m.registered_at)+'</td>'
-        +'</tr>';
-    }).join('');
   }catch(e){
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--pink-deep)">Error: '+e.message+'</td></tr>';
+    document.getElementById('serversStatusBar').innerHTML =
+      '<div class="toast err">'+esc(e.message)+'</div>';
   }
 }
 
+function fillConfigFields(detail){
+  document.getElementById('cfgNewRole').value     = detail.new_role_id    || '';
+  document.getElementById('cfgMemberRole').value  = detail.member_role_id || '';
+  document.getElementById('cfgLeaderRoles').value = (detail.leader_role_ids||[]).join('\n');
+}
+
+function resetConfigEdits(){
+  if(!currentServer) return;
+  fillConfigFields(currentServer.snapshot);
+  document.getElementById('serversStatusBar').innerHTML =
+    '<div class="toast ok">Reverted to last saved values.</div>';
+  setTimeout(()=>{document.getElementById('serversStatusBar').innerHTML=''}, 3000);
+}
+
+async function saveServerConfig(){
+  if(!currentServer) return;
+  const newRole = document.getElementById('cfgNewRole').value.trim();
+  const memRole = document.getElementById('cfgMemberRole').value.trim();
+  const leaderRaw = document.getElementById('cfgLeaderRoles').value;
+  const leaderRoles = leaderRaw.split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+
+  // Client-side validation
+  if(!leaderRoles.length){
+    showServersToast('At least one leader role is required.','err');
+    return;
+  }
+  const bad = [newRole, memRole, ...leaderRoles].filter(v => v && !/^\d+$/.test(v));
+  if(bad.length){
+    showServersToast('Invalid role ID(s): '+bad.join(', '),'err');
+    return;
+  }
+  if(newRole && memRole && newRole === memRole){
+    showServersToast("'New' role and 'Member' role must be different.",'err');
+    return;
+  }
+
+  try{
+    const r = await fetch('/api/servers/'+encodeURIComponent(currentServer.guild_id)+'/config', {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        leader_role_ids: leaderRoles,
+        new_role_id:     newRole,
+        member_role_id:  memRole,
+      }),
+    });
+    const data = await r.json();
+    if(!r.ok) throw new Error(data.error || 'Save failed');
+    // Refresh snapshot so Reset knows the new baseline
+    currentServer.snapshot.leader_role_ids = leaderRoles;
+    currentServer.snapshot.new_role_id     = newRole;
+    currentServer.snapshot.member_role_id  = memRole;
+    showServersToast('✓ Configuration saved.','ok');
+  }catch(e){
+    showServersToast('Save failed: '+e.message,'err');
+  }
+}
+
+function showServersToast(msg, type){
+  const b = document.getElementById('serversStatusBar');
+  b.innerHTML = '<div class="toast '+type+'">'+esc(msg)+'</div>';
+  setTimeout(()=>{b.innerHTML=''}, 4500);
+}
+
 function showServerList(){
-  document.getElementById('serverListView').style.display = '';
-  document.getElementById('memberListView').style.display = 'none';
+  document.getElementById('serverListView').style.display   = '';
+  document.getElementById('serverDetailView').style.display = 'none';
   document.getElementById('serversBannerTitle').textContent = '🌿 Servers';
   document.getElementById('serversBannerSub').textContent   = 'Servers using Dreamweaving Garden Bot';
+  currentServer = null;
 }
 
 function setFilter(f,el){
