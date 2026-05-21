@@ -6,7 +6,7 @@ All queries are guild-scoped to support multiple servers cleanly.
 
 import json
 import sqlite3
-from db.schema import get_db
+from db.schema import get_db, init_db  # re-exported so bot.py can import from here
 
 
 # ------------------------------------------------------------------
