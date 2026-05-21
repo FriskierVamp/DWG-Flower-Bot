@@ -1,34 +1,45 @@
 """
 commands/admin.py
 Dreamweaving Garden Bot — /admin command group (leader-only)
-Everything that isn't for regular members.
 
-Subgroups & subcommands:
-  /admin member add | remove | updateign | list
-  /admin flower add | remove                 (override any player's flowers)
-  /admin vase   add | remove                 (override any player's vases)
-  /admin contribution log | leaderboard
-  /admin league log | standings | unlock | remaining | resetweek
-  /admin config leaderroles | newrole | memberrole
-  /admin guide post [channel]
+Panel-based architecture: 7 entry-point commands, each opens an ephemeral
+View with buttons + dropdowns instead of dozens of flat subcommands.
+
+  /admin members        — manage registered players
+  /admin flowers        — override player flower lists
+  /admin vases          — override player vase lists
+  /admin contributions  — log credit, view leaderboard
+  /admin league         — standings, locks, weekly reset
+  /admin config         — update roles after setup
+  /admin guide          — post the member-facing help guide
+
+Visibility (per spec):
+  PUBLIC results: add member, remove member, leaderboard, standings,
+                  unlock player, remaining, reset week, guide post
+  EPHEMERAL:      everything else (logging, member browsing, config tweaks,
+                  flower/vase overrides, update ign)
 """
 
 import datetime
 import discord
 from discord import app_commands
+
 from db.queries import (
-    register_player, remove_player, update_player_ign, get_all_players, find_player, find_player_by_ign,
-    add_player_flower, remove_player_flower,
-    add_player_vase,   remove_player_vase,
+    register_player, remove_player, update_player_ign,
+    get_all_players, find_player, find_player_by_ign,
+    add_player_flower, remove_player_flower, get_player_flowers,
+    add_player_vase,   remove_player_vase,   get_player_vases,
     find_flower_match, find_vase_match,
     get_flower_names_for_autocomplete, get_vase_names_for_autocomplete,
     log_contribution, get_guild_contribution_totals,
     log_league_entry, get_guild_league_standings,
     set_league_lock, get_guild_league_state, reset_league_week,
+    get_all_flowers, get_all_vases,
 )
 from db.schema import upsert_guild_config, get_guild_config
 from utils.guards import reject_if_not_setup, reject_if_not_leader
 
+# ── Colors & footer ────────────────────────────────────────────────
 DWG_PURPLE = discord.Color(0xF0A8C0)
 DWG_MINT   = discord.Color(0xB8D9B0)
 DWG_PINK   = discord.Color(0xF7CCD8)
@@ -36,26 +47,12 @@ DWG_BLUE   = discord.Color(0xB8D8F0)
 DWG_YELLOW = discord.Color(0xF7C898)
 FOOTER     = "Dreamweaving Garden • Grow together, bloom brighter"
 
-
-# ------------------------------------------------------------------
-# AUTOCOMPLETES
-# ------------------------------------------------------------------
-
-async def flower_name_autocomplete(
-    interaction: discord.Interaction, current: str,
-) -> list[app_commands.Choice[str]]:
-    names = get_flower_names_for_autocomplete()
-    q = (current or "").lower()
-    return [app_commands.Choice(name=n, value=n) for n in names if q in n.lower()][:25]
+PANEL_TIMEOUT = 600  # 10 minutes
 
 
-async def vase_name_autocomplete(
-    interaction: discord.Interaction, current: str,
-) -> list[app_commands.Choice[str]]:
-    names = get_vase_names_for_autocomplete()
-    q = (current or "").lower()
-    return [app_commands.Choice(name=n, value=n) for n in names if q in n.lower()][:25]
-
+# ════════════════════════════════════════════════════════════════════
+# UTILITIES
+# ════════════════════════════════════════════════════════════════════
 
 def _current_week_start() -> str:
     today = datetime.datetime.utcnow().date()
@@ -63,629 +60,1027 @@ def _current_week_start() -> str:
     return monday.isoformat()
 
 
-def _resolve_target(interaction: discord.Interaction,
-                    member: discord.Member | None, ign: str | None) -> dict | None:
-    """Find a player row by Discord member OR by IGN. Returns dict or None."""
-    if member:
-        return find_player(str(interaction.guild_id), str(member.id))
-    if ign:
-        return find_player_by_ign(str(interaction.guild_id), ign)
-    return None
+def _embed(title: str, desc: str = "", color: discord.Color = DWG_PURPLE) -> discord.Embed:
+    e = discord.Embed(title=title, description=desc, color=color)
+    e.set_footer(text=FOOTER)
+    return e
 
 
-# ------------------------------------------------------------------
-# GUIDE EMBEDS — posted by /admin guide post
-# ------------------------------------------------------------------
-
-def _guide_embeds() -> list[discord.Embed]:
-    welcome = discord.Embed(
-        title="🌸 Welcome to Dreamweaving Garden",
-        description=(
-            "A friendly guild bot for tracking flowers, vases, league, and contributions.\n\n"
-            "**First step for everyone:** run `/register` and enter your in-game name. "
-            "That swaps your role and unlocks the rest of the bot.\n\n"
-            "Below you'll find a quick guide for each command group. "
-            "Use `/help` anytime for a private version of this."
-        ),
-        color=DWG_PURPLE,
-    )
-    welcome.set_footer(text=FOOTER)
-
-    my_embed = discord.Embed(
-        title="🌷 /my — your personal collection",
-        description=(
-            "**Everyone** — track what flowers and vases you've got.\n\n"
-            "• `/my flowers` — see your flower collection\n"
-            "• `/my vases` — see your vase collection\n"
-            "• `/my add flower [name]` — add a flower (autocomplete works)\n"
-            "• `/my add vase [name]` — add a vase\n"
-            "• `/my remove flower [name]` — remove one\n"
-            "• `/my remove vase [name]` — remove one\n"
-            "• `/my missing flowers` — what flowers you still need\n"
-            "• `/my missing vases` — what vases you still need"
-        ),
-        color=DWG_PINK,
-    )
-    my_embed.set_footer(text=FOOTER)
-
-    lookup_embed = discord.Embed(
-        title="🔍 /lookup — find things across the guild",
-        description=(
-            "**Everyone** — see who has what, and what's missing entirely.\n\n"
-            "• `/lookup flower [name]` — who has this flower\n"
-            "• `/lookup vase [name]` — who has this vase\n"
-            "• `/lookup missing flowers` — flowers nobody in the guild has\n"
-            "• `/lookup missing vases` — vases nobody in the guild has"
-        ),
-        color=DWG_BLUE,
-    )
-    lookup_embed.set_footer(text=FOOTER)
-
-    league_embed = discord.Embed(
-        title="🌟 /league — weekly league",
-        description=(
-            "**Everyone** — coordinate your weekly runs.\n\n"
-            "• `/league call` — rally the guild that league is starting\n"
-            "• `/league lock` — mark yourself done for the week\n"
-            "• `/league preview` — see who's locked in this week"
-        ),
-        color=DWG_YELLOW,
-    )
-    league_embed.set_footer(text=FOOTER)
-
-    admin_embed = discord.Embed(
-        title="⚙️ /admin — leaders only",
-        description=(
-            "**Leader role required** — everything operational lives here.\n\n"
-            "**Members:** `/admin member add|remove|updateign|list`\n"
-            "**Overrides:** `/admin flower add|remove`, `/admin vase add|remove`\n"
-            "**Contributions:** `/admin contribution log`, `/admin contribution leaderboard`\n"
-            "**League ops:** `/admin league log|standings|unlock|remaining|resetweek`\n"
-            "**Config:** `/admin config leaderroles|newrole|memberrole`\n"
-            "**Guide:** `/admin guide post [channel]` — re-post this guide"
-        ),
-        color=DWG_MINT,
-    )
-    admin_embed.set_footer(text=FOOTER)
-
-    return [welcome, my_embed, lookup_embed, league_embed, admin_embed]
+def _chunk_lines(lines: list[str], max_chars: int = 3800) -> list[str]:
+    """Split lines into chunks that fit in an embed description."""
+    chunks, buf, length = [], [], 0
+    for ln in lines:
+        ln_len = len(ln) + 1
+        if length + ln_len > max_chars and buf:
+            chunks.append("\n".join(buf))
+            buf, length = [], 0
+        buf.append(ln)
+        length += ln_len
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
 
 
-# ------------------------------------------------------------------
-# REGISTRATION
-# ------------------------------------------------------------------
-
-def register_admin(tree: app_commands.CommandTree) -> None:
-
-    admin    = app_commands.Group(name="admin", description="Leader-only management commands")
-    member_g = app_commands.Group(name="member",       description="Manage registered members",        parent=admin)
-    flower_g = app_commands.Group(name="flower",       description="Override player flower lists",      parent=admin)
-    vase_g   = app_commands.Group(name="vase",         description="Override player vase lists",        parent=admin)
-    contrib  = app_commands.Group(name="contribution", description="Log and view contributions",        parent=admin)
-    league_g = app_commands.Group(name="league",       description="League management operations",      parent=admin)
-    config_g = app_commands.Group(name="config",       description="Update server configuration",       parent=admin)
-    guide_g  = app_commands.Group(name="guide",        description="Post the bot guide to a channel",   parent=admin)
-
-    # ────────────────────────────────────────────────────────────────
-    # MEMBER GROUP
-    # ────────────────────────────────────────────────────────────────
-
-    @member_g.command(name="add", description="Register a player on their behalf")
-    @app_commands.describe(member="Discord member to register", ign="Their in-game name")
-    async def admin_member_add(interaction: discord.Interaction,
-                               member: discord.Member, ign: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        ok = register_player(
-            str(interaction.guild_id), str(member.id),
-            member.display_name, ign.strip(),
+async def _send_public(interaction: discord.Interaction, embed: discord.Embed) -> None:
+    """Post a public message in the channel where the command was run."""
+    try:
+        await interaction.channel.send(embed=embed)
+    except discord.Forbidden:
+        # If we can't post publicly, fall back to ephemeral so the action isn't lost
+        await interaction.followup.send(
+            embed=_embed(
+                "⚠️ Couldn't post publicly",
+                f"The action succeeded but I don't have permission to post in {interaction.channel.mention}.",
+                DWG_PINK,
+            ),
+            ephemeral=True,
         )
-        if not ok:
+
+
+def _search_members(guild_id: str, query: str) -> list[dict]:
+    """Find members by IGN or Discord name (case-insensitive substring). Sorted by IGN."""
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    all_members = get_all_players(guild_id)
+    matches = [
+        p for p in all_members
+        if q in (p.get("ign") or "").lower()
+        or q in (p.get("discord_name") or "").lower()
+    ]
+    matches.sort(key=lambda p: (p.get("ign") or "").lower())
+    return matches
+
+
+# ════════════════════════════════════════════════════════════════════
+# GENERIC REUSABLE COMPONENTS
+# ════════════════════════════════════════════════════════════════════
+
+class ConfirmView(discord.ui.View):
+    """Generic yes/no confirmation. Calls on_confirm coroutine on Confirm."""
+
+    def __init__(self, on_confirm, danger_label: str = "Confirm"):
+        super().__init__(timeout=PANEL_TIMEOUT)
+        self.on_confirm = on_confirm
+        self.confirm_btn.label = danger_label
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        self.stop()
+        await self.on_confirm(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        self.stop()
+        await interaction.response.edit_message(
+            embed=_embed("Cancelled", "No changes made.", DWG_PINK),
+            view=None,
+        )
+
+
+class MemberPickSelect(discord.ui.Select):
+    """Dropdown of matching members. Calls on_pick(interaction, discord_id, ign) on selection."""
+
+    def __init__(self, matches: list[dict], on_pick, placeholder: str = "Pick a member…"):
+        self.on_pick = on_pick
+        options = []
+        for m in matches[:25]:
+            label = (m.get("ign") or "Unknown")[:100]
+            discord_name = m.get("discord_name") or ""
+            desc = (f"Discord: {discord_name}" if discord_name else f"ID: {m['discord_id']}")[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                value=m["discord_id"],
+                description=desc,
+            ))
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        discord_id = self.values[0]
+        ign = next(o.label for o in self.options if o.value == discord_id)
+        await self.on_pick(interaction, discord_id, ign)
+
+
+class MemberPickView(discord.ui.View):
+    def __init__(self, matches: list[dict], on_pick, placeholder: str = "Pick a member…"):
+        super().__init__(timeout=PANEL_TIMEOUT)
+        self.add_item(MemberPickSelect(matches, on_pick, placeholder))
+
+
+class MemberSearchModal(discord.ui.Modal):
+    """Text input for member name, then shows disambiguation dropdown."""
+
+    def __init__(self, on_pick, title: str = "Find Member"):
+        super().__init__(title=title[:45])
+        self.on_pick = on_pick
+        self.query_input = discord.ui.TextInput(
+            label="Type IGN or partial name",
+            placeholder="e.g. alice",
+            min_length=1, max_length=50, required=True,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        matches = _search_members(str(interaction.guild_id), self.query_input.value)
+        if not matches:
             await interaction.response.send_message(
-                embed=discord.Embed(
-                    description=f"{member.mention} is already registered.",
-                    color=DWG_PINK,
+                embed=_embed(
+                    "🔍 No matches",
+                    f"No member found matching **{self.query_input.value}**. Try a different search.",
+                    DWG_PINK,
                 ),
                 ephemeral=True,
             )
             return
 
-        # Best-effort role swap if config is present
-        cfg = get_guild_config(str(interaction.guild_id))
-        if cfg:
-            try:
-                new_role    = interaction.guild.get_role(int(cfg.get("new_role_id")))    if cfg.get("new_role_id")    else None
-                member_role = interaction.guild.get_role(int(cfg.get("member_role_id"))) if cfg.get("member_role_id") else None
-                if new_role and new_role in member.roles:
-                    await member.remove_roles(new_role, reason="Admin registration")
-                if member_role:
-                    await member.add_roles(member_role, reason="Admin registration")
-            except (discord.Forbidden, ValueError, TypeError):
-                pass
+        if len(matches) == 1:
+            m = matches[0]
+            await self.on_pick(interaction, m["discord_id"], m["ign"])
+            return
 
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🌱 Member Registered",
-                description=f"{member.mention} registered as **{ign.strip()}**.",
-                color=DWG_MINT,
+            embed=_embed(
+                f"🔍 Found {len(matches)} matches",
+                "Pick the right one from the list below."
+                + ("\n_(Showing first 25 — refine your search if needed.)_" if len(matches) > 25 else ""),
+                DWG_PURPLE,
             ),
+            view=MemberPickView(matches, self.on_pick),
             ephemeral=True,
         )
 
-    @member_g.command(name="remove", description="Remove a registered member from the guild roster")
-    @app_commands.describe(member="The member to remove")
-    async def admin_member_remove(interaction: discord.Interaction, member: discord.Member):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
 
-        ok = remove_player(str(interaction.guild_id), str(member.id))
+class ItemPickSelect(discord.ui.Select):
+    """Generic dropdown for picking from a list of item names (flowers/vases)."""
+
+    def __init__(self, names: list[str], on_pick, placeholder: str = "Pick one…"):
+        self.on_pick = on_pick
+        options = [
+            discord.SelectOption(label=n[:100], value=n[:100])
+            for n in names[:25]
+        ]
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.on_pick(interaction, self.values[0])
+
+
+class ItemPickView(discord.ui.View):
+    def __init__(self, names: list[str], on_pick, placeholder: str = "Pick one…"):
+        super().__init__(timeout=PANEL_TIMEOUT)
+        self.add_item(ItemPickSelect(names, on_pick, placeholder))
+
+
+class ItemSearchModal(discord.ui.Modal):
+    """Search a master item list (flowers or vases). Shows dropdown if multi-match."""
+
+    def __init__(self, names_provider, on_pick,
+                 title: str = "Find item", label: str = "Type the name"):
+        super().__init__(title=title[:45])
+        self.names_provider = names_provider
+        self.on_pick = on_pick
+        self.query_input = discord.ui.TextInput(
+            label=label[:45],
+            placeholder="e.g. rose",
+            min_length=1, max_length=80, required=True,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        q = self.query_input.value.strip().lower()
+        names = self.names_provider()
+        hits = [n for n in names if q in n.lower()]
+        hits.sort(key=str.lower)
+
+        if not hits:
+            await interaction.response.send_message(
+                embed=_embed("❌ No matches", f"Nothing matches **{self.query_input.value}**.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+
+        if len(hits) == 1:
+            await self.on_pick(interaction, hits[0])
+            return
+
+        exact = next((n for n in hits if n.lower() == q), None)
+        if exact:
+            await self.on_pick(interaction, exact)
+            return
+
+        await interaction.response.send_message(
+            embed=_embed(
+                f"🔍 Found {len(hits)} matches",
+                "Pick the right one."
+                + ("\n_(Showing first 25 — refine your search if needed.)_" if len(hits) > 25 else ""),
+                DWG_PURPLE,
+            ),
+            view=ItemPickView(hits, self.on_pick),
+            ephemeral=True,
+        )
+
+
+# ════════════════════════════════════════════════════════════════════
+# MEMBERS PANEL
+# ════════════════════════════════════════════════════════════════════
+
+class AddMemberModal(discord.ui.Modal, title="Add New Member"):
+    discord_id_input = discord.ui.TextInput(
+        label="Discord User ID",
+        placeholder="Right-click user → Copy ID (Developer Mode on)",
+        min_length=5, max_length=25, required=True,
+    )
+    ign_input = discord.ui.TextInput(
+        label="In-Game Name",
+        placeholder="Their exact in-game name",
+        min_length=2, max_length=50, required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        did = self.discord_id_input.value.strip()
+        ign = self.ign_input.value.strip()
+
+        if not did.isdigit():
+            await interaction.response.send_message(
+                embed=_embed("❌ Invalid Discord ID", "Discord IDs are numeric — right-click a user and Copy ID.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.guild.get_member(int(did))
+        display = member.display_name if member else f"User {did}"
+
+        ok = register_player(str(interaction.guild_id), did, display, ign)
         if not ok:
             await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered.", color=DWG_PINK),
+                embed=_embed("📋 Already Registered", "That user is already in the roster.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+
+        # Best-effort role swap
+        if member:
+            cfg = get_guild_config(str(interaction.guild_id))
+            if cfg:
+                try:
+                    new_role    = interaction.guild.get_role(int(cfg["new_role_id"]))    if cfg.get("new_role_id")    else None
+                    member_role = interaction.guild.get_role(int(cfg["member_role_id"])) if cfg.get("member_role_id") else None
+                    if new_role and new_role in member.roles:
+                        await member.remove_roles(new_role, reason="Admin registration")
+                    if member_role:
+                        await member.add_roles(member_role, reason="Admin registration")
+                except (discord.Forbidden, ValueError, TypeError):
+                    pass
+
+        await interaction.response.send_message(
+            embed=_embed("✓ Done", f"Registered **{ign}**.", DWG_MINT),
+            ephemeral=True,
+        )
+
+        # PUBLIC welcome
+        mention = member.mention if member else f"<@{did}>"
+        await _send_public(interaction, _embed(
+            "🌱 New Member Registered",
+            f"{mention} has been registered as **{ign}**. Welcome to the garden!",
+            DWG_MINT,
+        ))
+
+
+class UpdateIGNModal(discord.ui.Modal, title="Update IGN"):
+    def __init__(self, discord_id: str, current_ign: str):
+        super().__init__()
+        self.discord_id  = discord_id
+        self.current_ign = current_ign
+        self.new_ign_input = discord.ui.TextInput(
+            label=f"New IGN for {current_ign[:30]}",
+            placeholder="Their new in-game name",
+            min_length=2, max_length=50, required=True,
+        )
+        self.add_item(self.new_ign_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_ign = self.new_ign_input.value.strip()
+        ok = update_player_ign(str(interaction.guild_id), self.discord_id, new_ign)
+        if not ok:
+            await interaction.response.send_message(
+                embed=_embed("❌ Update failed", "Member not found.", DWG_PINK),
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🗑️ Member Removed",
-                description=f"{member.mention} has been removed from the guild roster.",
-                color=DWG_MINT,
-            ),
+            embed=_embed("✏️ IGN Updated", f"**{self.current_ign}** → **{new_ign}**", DWG_MINT),
             ephemeral=True,
         )
 
-    @member_g.command(name="updateign", description="Update a member's in-game name")
-    @app_commands.describe(member="The member to update", new_ign="Their new in-game name")
-    async def admin_member_updateign(interaction: discord.Interaction,
-                                     member: discord.Member, new_ign: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
 
-        ok = update_player_ign(str(interaction.guild_id), str(member.id), new_ign.strip())
-        if not ok:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered.", color=DWG_PINK),
+class MembersPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="+ Add", style=discord.ButtonStyle.success, row=0)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddMemberModal())
+
+    @discord.ui.button(label="✕ Remove", style=discord.ButtonStyle.danger, row=0)
+    async def remove_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            async def do_remove(confirm_inter: discord.Interaction):
+                ok = remove_player(str(confirm_inter.guild_id), discord_id)
+                if not ok:
+                    await confirm_inter.response.edit_message(
+                        embed=_embed("❌ Remove failed", "Member not found.", DWG_PINK),
+                        view=None,
+                    )
+                    return
+                await confirm_inter.response.edit_message(
+                    embed=_embed("✓ Removed", f"**{ign}** removed from the roster.", DWG_MINT),
+                    view=None,
+                )
+                await _send_public(confirm_inter, _embed(
+                    "🗑️ Member Removed",
+                    f"**{ign}** has been removed from the guild roster.",
+                    DWG_PINK,
+                ))
+
+            await inter.response.send_message(
+                embed=_embed(
+                    "⚠️ Confirm Remove",
+                    f"Remove **{ign}** from the roster? This also clears their flower/vase collections.\n\n_This can't be undone._",
+                    DWG_PINK,
+                ),
+                view=ConfirmView(do_remove, danger_label="Remove"),
                 ephemeral=True,
             )
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="✏️ IGN Updated",
-                description=f"{member.mention} is now **{new_ign.strip()}**.",
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
+
+        await interaction.response.send_modal(
+            MemberSearchModal(after_pick, title="Remove Member")
         )
 
-    @member_g.command(name="list", description="List every registered member in the guild")
-    async def admin_member_list(interaction: discord.Interaction):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
+    @discord.ui.button(label="✏️ Update IGN", style=discord.ButtonStyle.primary, row=0)
+    async def update_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            await inter.response.send_modal(UpdateIGNModal(discord_id, ign))
 
+        await interaction.response.send_modal(
+            MemberSearchModal(after_pick, title="Update Member IGN")
+        )
+
+    @discord.ui.button(label="📋 List All", style=discord.ButtonStyle.secondary, row=1)
+    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         players = get_all_players(str(interaction.guild_id))
         if not players:
             await interaction.response.send_message(
-                embed=discord.Embed(description="No registered members yet.", color=DWG_PINK),
+                embed=_embed("📋 Members", "No registered members yet.", DWG_PINK),
                 ephemeral=True,
             )
             return
 
-        lines = [f"• **{p['ign']}** — <@{p['discord_id']}>" for p in players[:50]]
-        body  = "\n".join(lines)
-        if len(players) > 50:
-            body += f"\n\n_… and {len(players) - 50} more._"
-        embed = discord.Embed(
-            title=f"📋 Registered Members  ({len(players)})",
-            description=body,
-            color=DWG_BLUE,
-        )
-        embed.set_footer(text=FOOTER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        players.sort(key=lambda p: (p.get("ign") or "").lower())
+        lines = [f"• **{p['ign']}** — <@{p['discord_id']}>" for p in players]
+        chunks = _chunk_lines(lines)
+        first = _embed(f"📋 Registered Members ({len(players)})", chunks[0], DWG_BLUE)
+        await interaction.response.send_message(embed=first, ephemeral=True)
+        for c in chunks[1:]:
+            await interaction.followup.send(embed=_embed("…continued", c, DWG_BLUE), ephemeral=True)
 
-    # ────────────────────────────────────────────────────────────────
-    # FLOWER OVERRIDE GROUP
-    # ────────────────────────────────────────────────────────────────
 
-    @flower_g.command(name="add", description="Add a flower to a member's collection")
-    @app_commands.describe(member="The member", name="Flower name")
-    @app_commands.autocomplete(name=flower_name_autocomplete)
-    async def admin_flower_add(interaction: discord.Interaction,
-                               member: discord.Member, name: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
+# ════════════════════════════════════════════════════════════════════
+# FLOWERS / VASES PANELS (shared structure)
+# ════════════════════════════════════════════════════════════════════
 
-        if not find_player(str(interaction.guild_id), str(member.id)):
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered yet.", color=DWG_PINK),
-                ephemeral=True,
+class _CollectionPanel(discord.ui.View):
+    """Shared base for flower and vase override panels."""
+
+    KIND        = "flower"
+    KIND_TITLE  = "Flower"
+    KIND_EMOJI  = "🌸"
+    NAMES_FN    = staticmethod(get_flower_names_for_autocomplete)
+    ADD_FN      = staticmethod(add_player_flower)
+    REMOVE_FN   = staticmethod(remove_player_flower)
+    GET_OWNED   = staticmethod(get_player_flowers)
+
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="+ Add to player", style=discord.ButtonStyle.success, row=0)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cls = self.__class__
+
+        async def after_member_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            async def after_item_pick(item_inter: discord.Interaction, item_name: str):
+                ok = cls.ADD_FN(
+                    str(item_inter.guild_id), discord_id, item_name,
+                    source_type="admin", logged_by=str(item_inter.user.id),
+                )
+                if not ok:
+                    msg = f"**{ign}** already has **{item_name}**, or that {cls.KIND} doesn't exist."
+                    await item_inter.response.send_message(
+                        embed=_embed("⚠️ Not added", msg, DWG_PINK),
+                        ephemeral=True,
+                    )
+                    return
+                await item_inter.response.send_message(
+                    embed=_embed(
+                        f"{cls.KIND_EMOJI} Added",
+                        f"Added **{item_name}** to **{ign}**'s collection.",
+                        DWG_MINT,
+                    ),
+                    ephemeral=True,
+                )
+
+            await inter.response.send_modal(
+                ItemSearchModal(
+                    names_provider=cls.NAMES_FN,
+                    on_pick=after_item_pick,
+                    title=f"Add {cls.KIND_TITLE} to {ign[:20]}",
+                    label=f"Type {cls.KIND_TITLE.lower()} name",
+                )
             )
-            return
 
-        matched = find_flower_match(name)
-        if not matched:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"❌ No flower matches **{name}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-
-        ok = add_player_flower(
-            str(interaction.guild_id), str(member.id), matched,
-            source_type="admin", logged_by=str(interaction.user.id),
-        )
-        if not ok:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} already has **{matched}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🌸 Flower Added",
-                description=f"Added **{matched}** to {member.mention}'s collection.",
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
-        )
-
-    @flower_g.command(name="remove", description="Remove a flower from a member's collection")
-    @app_commands.describe(member="The member", name="Flower name")
-    @app_commands.autocomplete(name=flower_name_autocomplete)
-    async def admin_flower_remove(interaction: discord.Interaction,
-                                  member: discord.Member, name: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        matched = find_flower_match(name) or name
-        ok = remove_player_flower(str(interaction.guild_id), str(member.id), matched)
-        if not ok:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} doesn't have **{matched}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🗑️ Flower Removed",
-                description=f"Removed **{matched}** from {member.mention}'s collection.",
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
+        await interaction.response.send_modal(
+            MemberSearchModal(after_member_pick, title=f"Add {cls.KIND_TITLE} — pick member")
         )
 
-    # ────────────────────────────────────────────────────────────────
-    # VASE OVERRIDE GROUP
-    # ────────────────────────────────────────────────────────────────
+    @discord.ui.button(label="✕ Remove from player", style=discord.ButtonStyle.danger, row=0)
+    async def remove_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cls = self.__class__
 
-    @vase_g.command(name="add", description="Add a vase to a member's collection")
-    @app_commands.describe(member="The member", name="Vase name")
-    @app_commands.autocomplete(name=vase_name_autocomplete)
-    async def admin_vase_add(interaction: discord.Interaction,
-                             member: discord.Member, name: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
+        async def after_member_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            owned = cls.GET_OWNED(str(inter.guild_id), discord_id)
+            if not owned:
+                await inter.response.send_message(
+                    embed=_embed(
+                        f"{cls.KIND_EMOJI} Empty collection",
+                        f"**{ign}** doesn't have any {cls.KIND}s tracked.",
+                        DWG_PINK,
+                    ),
+                    ephemeral=True,
+                )
+                return
 
-        if not find_player(str(interaction.guild_id), str(member.id)):
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered yet.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
+            async def after_item_pick(item_inter: discord.Interaction, item_name: str):
+                async def do_remove(confirm_inter: discord.Interaction):
+                    ok = cls.REMOVE_FN(str(confirm_inter.guild_id), discord_id, item_name)
+                    if not ok:
+                        await confirm_inter.response.edit_message(
+                            embed=_embed("❌ Remove failed", f"They don't have **{item_name}**.", DWG_PINK),
+                            view=None,
+                        )
+                        return
+                    await confirm_inter.response.edit_message(
+                        embed=_embed(
+                            "🗑️ Removed",
+                            f"Removed **{item_name}** from **{ign}**'s collection.",
+                            DWG_MINT,
+                        ),
+                        view=None,
+                    )
 
-        matched = find_vase_match(name)
-        if not matched:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"❌ No vase matches **{name}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
+                await item_inter.response.send_message(
+                    embed=_embed(
+                        "⚠️ Confirm Remove",
+                        f"Remove **{item_name}** from **{ign}**'s collection?",
+                        DWG_PINK,
+                    ),
+                    view=ConfirmView(do_remove, danger_label="Remove"),
+                    ephemeral=True,
+                )
 
-        ok = add_player_vase(
-            str(interaction.guild_id), str(member.id), matched,
-            source_type="admin", logged_by=str(interaction.user.id),
+            if len(owned) <= 25:
+                await inter.response.send_message(
+                    embed=_embed(
+                        f"{cls.KIND_EMOJI} {ign}'s {cls.KIND}s ({len(owned)})",
+                        f"Pick which {cls.KIND} to remove.",
+                        DWG_PURPLE,
+                    ),
+                    view=ItemPickView(owned, after_item_pick, placeholder=f"Pick a {cls.KIND}…"),
+                    ephemeral=True,
+                )
+            else:
+                def owned_names_provider():
+                    return owned
+                await inter.response.send_modal(
+                    ItemSearchModal(
+                        names_provider=owned_names_provider,
+                        on_pick=after_item_pick,
+                        title=f"Remove {cls.KIND_TITLE} — search",
+                        label=f"Type {cls.KIND_TITLE.lower()} name",
+                    )
+                )
+
+        await interaction.response.send_modal(
+            MemberSearchModal(after_member_pick, title=f"Remove {cls.KIND_TITLE} — pick member")
         )
-        if not ok:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} already has **{matched}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🏺 Vase Added",
-                description=f"Added **{matched}** to {member.mention}'s collection.",
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
+
+
+class FlowersPanel(_CollectionPanel):
+    KIND        = "flower"
+    KIND_TITLE  = "Flower"
+    KIND_EMOJI  = "🌸"
+    NAMES_FN    = staticmethod(get_flower_names_for_autocomplete)
+    ADD_FN      = staticmethod(add_player_flower)
+    REMOVE_FN   = staticmethod(remove_player_flower)
+    GET_OWNED   = staticmethod(get_player_flowers)
+
+
+class VasesPanel(_CollectionPanel):
+    KIND        = "vase"
+    KIND_TITLE  = "Vase"
+    KIND_EMOJI  = "🏺"
+    NAMES_FN    = staticmethod(get_vase_names_for_autocomplete)
+    ADD_FN      = staticmethod(add_player_vase)
+    REMOVE_FN   = staticmethod(remove_player_vase)
+    GET_OWNED   = staticmethod(get_player_vases)
+
+
+# ════════════════════════════════════════════════════════════════════
+# CONTRIBUTIONS PANEL
+# ════════════════════════════════════════════════════════════════════
+
+class LogContributionModal(discord.ui.Modal, title="Log Contribution"):
+    def __init__(self, discord_id: str, ign: str):
+        super().__init__()
+        self.discord_id = discord_id
+        self.ign        = ign
+        self.amount_input = discord.ui.TextInput(
+            label=f"Amount for {ign[:30]}",
+            placeholder="e.g. 5000",
+            min_length=1, max_length=12, required=True,
         )
-
-    @vase_g.command(name="remove", description="Remove a vase from a member's collection")
-    @app_commands.describe(member="The member", name="Vase name")
-    @app_commands.autocomplete(name=vase_name_autocomplete)
-    async def admin_vase_remove(interaction: discord.Interaction,
-                                member: discord.Member, name: str):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        matched = find_vase_match(name) or name
-        ok = remove_player_vase(str(interaction.guild_id), str(member.id), matched)
-        if not ok:
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} doesn't have **{matched}**.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🗑️ Vase Removed",
-                description=f"Removed **{matched}** from {member.mention}'s collection.",
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
+        self.note_input = discord.ui.TextInput(
+            label="Note (optional)",
+            placeholder="e.g. Weekly run",
+            max_length=200, required=False,
+            style=discord.TextStyle.short,
         )
+        self.add_item(self.amount_input)
+        self.add_item(self.note_input)
 
-    # ────────────────────────────────────────────────────────────────
-    # CONTRIBUTION GROUP
-    # ────────────────────────────────────────────────────────────────
-
-    @contrib.command(name="log", description="Record a contribution for a member")
-    @app_commands.describe(
-        member="The member", amount="Contribution amount", note="Optional note",
-    )
-    async def admin_contrib_log(interaction: discord.Interaction,
-                                member: discord.Member, amount: int, note: str = None):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        if not find_player(str(interaction.guild_id), str(member.id)):
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(self.amount_input.value.replace(",", "").strip())
+        except ValueError:
             await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered yet.", color=DWG_PINK),
+                embed=_embed("❌ Invalid amount", "Amount must be a whole number.", DWG_PINK),
                 ephemeral=True,
             )
             return
 
+        note = (self.note_input.value or "").strip() or None
         log_contribution(
-            str(interaction.guild_id), str(member.id), amount,
+            str(interaction.guild_id), self.discord_id, amount,
             contribution_date=datetime.datetime.utcnow().date().isoformat(),
             note=note, source_type="admin", logged_by=str(interaction.user.id),
         )
-        desc = f"Logged **{amount}** for {member.mention}."
+
+        desc = f"Logged **{amount:,}** for **{self.ign}**."
         if note:
             desc += f"\n_Note:_ {note}"
         await interaction.response.send_message(
-            embed=discord.Embed(title="💎 Contribution Logged", description=desc, color=DWG_MINT),
+            embed=_embed("💎 Contribution Logged", desc, DWG_MINT),
             ephemeral=True,
         )
 
-    @contrib.command(name="leaderboard", description="Show total contributions per member")
-    async def admin_contrib_leaderboard(interaction: discord.Interaction):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
 
+class ContributionsPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="📝 Log", style=discord.ButtonStyle.primary, row=0)
+    async def log_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            await inter.response.send_modal(LogContributionModal(discord_id, ign))
+
+        await interaction.response.send_modal(
+            MemberSearchModal(after_pick, title="Log Contribution — pick member")
+        )
+
+    @discord.ui.button(label="🏆 Leaderboard", style=discord.ButtonStyle.secondary, row=0)
+    async def leaderboard_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         rows = get_guild_contribution_totals(str(interaction.guild_id))
         if not rows:
             await interaction.response.send_message(
-                embed=discord.Embed(description="No contributions logged yet.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-
-        lines = [f"`{i + 1:2d}.` **{r['ign']}** — {r['total']:,}" for i, r in enumerate(rows[:25])]
-        embed = discord.Embed(
-            title="💎 Contribution Leaderboard",
-            description="\n".join(lines),
-            color=DWG_BLUE,
-        )
-        embed.set_footer(text=FOOTER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ────────────────────────────────────────────────────────────────
-    # LEAGUE GROUP
-    # ────────────────────────────────────────────────────────────────
-
-    @league_g.command(name="log", description="Record a league standing for a member")
-    @app_commands.describe(member="The member", rank="Rank", points="Points", season="Season identifier (optional)")
-    async def admin_league_log(interaction: discord.Interaction,
-                               member: discord.Member, rank: int, points: int,
-                               season: str = None):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        if not find_player(str(interaction.guild_id), str(member.id)):
-            await interaction.response.send_message(
-                embed=discord.Embed(description=f"{member.mention} isn't registered yet.", color=DWG_PINK),
-                ephemeral=True,
-            )
-            return
-
-        log_league_entry(
-            str(interaction.guild_id), str(member.id),
-            season=season, rank=rank, points=points,
-            source_type="admin", logged_by=str(interaction.user.id),
-        )
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="📊 League Entry Logged",
-                description=(
-                    f"**{member.mention}** — Rank **{rank}**, **{points:,}** points"
-                    + (f" (season `{season}`)" if season else "")
-                ),
-                color=DWG_MINT,
-            ),
-            ephemeral=True,
-        )
-
-    @league_g.command(name="standings", description="Show the league standings")
-    @app_commands.describe(season="Filter by season (optional)")
-    async def admin_league_standings(interaction: discord.Interaction, season: str = None):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        rows = get_guild_league_standings(str(interaction.guild_id), season=season)
-        if not rows:
-            await interaction.response.send_message(
-                embed=discord.Embed(description="No league entries logged yet.", color=DWG_PINK),
+                embed=_embed("💎 Leaderboard", "No contributions logged yet.", DWG_PINK),
                 ephemeral=True,
             )
             return
 
         lines = [
-            f"`#{r['rank']:>3}` **{r['ign']}** — {r['points']:,}"
-            for r in rows[:25]
+            f"`{i + 1:>3}.` **{r['ign']}** — {(r['total'] or 0):,}"
+            for i, r in enumerate(rows)
         ]
-        title = "🏆 League Standings"
-        if season:
-            title += f"  ·  {season}"
-        embed = discord.Embed(title=title, description="\n".join(lines), color=DWG_YELLOW)
-        embed.set_footer(text=FOOTER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @league_g.command(name="unlock", description="Unlock a player for the current week")
-    @app_commands.describe(member="The member to unlock")
-    async def admin_league_unlock(interaction: discord.Interaction, member: discord.Member):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        week = _current_week_start()
-        set_league_lock(
-            str(interaction.guild_id), str(member.id), week, locked=False,
-        )
+        chunks = _chunk_lines(lines)
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🔓 Player Unlocked",
-                description=f"{member.mention} unlocked for week of **{week}**.",
-                color=DWG_MINT,
-            ),
+            embed=_embed("✓", "Leaderboard posted in this channel.", DWG_MINT),
+            ephemeral=True,
+        )
+        await _send_public(interaction, _embed(
+            f"💎 Contribution Leaderboard ({len(rows)})",
+            chunks[0], DWG_BLUE,
+        ))
+        for c in chunks[1:]:
+            await _send_public(interaction, _embed("…continued", c, DWG_BLUE))
+
+
+# ════════════════════════════════════════════════════════════════════
+# LEAGUE PANEL
+# ════════════════════════════════════════════════════════════════════
+
+class LogLeagueModal(discord.ui.Modal, title="Log League Entry"):
+    def __init__(self, discord_id: str, ign: str):
+        super().__init__()
+        self.discord_id = discord_id
+        self.ign        = ign
+        self.rank_input = discord.ui.TextInput(
+            label=f"Rank for {ign[:30]}",
+            placeholder="e.g. 3",
+            min_length=1, max_length=6, required=True,
+        )
+        self.points_input = discord.ui.TextInput(
+            label="Points",
+            placeholder="e.g. 12000",
+            min_length=1, max_length=12, required=True,
+        )
+        self.season_input = discord.ui.TextInput(
+            label="Season (optional)",
+            placeholder="e.g. S26-W21",
+            max_length=30, required=False,
+        )
+        self.add_item(self.rank_input)
+        self.add_item(self.points_input)
+        self.add_item(self.season_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            rank   = int(self.rank_input.value.replace(",", "").strip())
+            points = int(self.points_input.value.replace(",", "").strip())
+        except ValueError:
+            await interaction.response.send_message(
+                embed=_embed("❌ Invalid numbers", "Rank and points must be whole numbers.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+
+        season = (self.season_input.value or "").strip() or None
+        log_league_entry(
+            str(interaction.guild_id), self.discord_id,
+            season=season, rank=rank, points=points,
+            source_type="admin", logged_by=str(interaction.user.id),
+        )
+
+        desc = f"**{self.ign}** — Rank **{rank}**, **{points:,}** points"
+        if season:
+            desc += f" (season `{season}`)"
+        await interaction.response.send_message(
+            embed=_embed("📊 League Entry Logged", desc, DWG_MINT),
             ephemeral=True,
         )
 
-    @league_g.command(name="remaining", description="See who hasn't locked in this week")
-    async def admin_league_remaining(interaction: discord.Interaction):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
 
-        week = _current_week_start()
-        all_players = get_all_players(str(interaction.guild_id))
-        state_rows  = get_guild_league_state(str(interaction.guild_id), week)
-        locked_ids  = {r["discord_id"] for r in state_rows if r.get("is_locked")}
+class StandingsSeasonModal(discord.ui.Modal, title="View Standings"):
+    season_input = discord.ui.TextInput(
+        label="Season filter (leave blank for all)",
+        placeholder="e.g. S26-W21",
+        max_length=30, required=False,
+    )
 
-        remaining = [p for p in all_players if p["discord_id"] not in locked_ids]
-        if not remaining:
+    async def on_submit(self, interaction: discord.Interaction):
+        season = (self.season_input.value or "").strip() or None
+        rows = get_guild_league_standings(str(interaction.guild_id), season=season)
+        if not rows:
             await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="✅ All Locked In",
-                    description=f"Everyone has locked in for week of **{week}**.",
-                    color=DWG_MINT,
+                embed=_embed("🏆 Standings", "No league entries logged yet.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+
+        lines = [
+            f"`#{(r.get('rank') or 0):>3}` **{r['ign']}** — {(r.get('points') or 0):,}"
+            for r in rows
+        ]
+        chunks = _chunk_lines(lines)
+        title = "🏆 League Standings" + (f" · {season}" if season else "")
+
+        await interaction.response.send_message(
+            embed=_embed("✓", "Standings posted in this channel.", DWG_MINT),
+            ephemeral=True,
+        )
+        await _send_public(interaction, _embed(title, chunks[0], DWG_YELLOW))
+        for c in chunks[1:]:
+            await _send_public(interaction, _embed("…continued", c, DWG_YELLOW))
+
+
+class LeaguePanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="📝 Log entry", style=discord.ButtonStyle.primary, row=0)
+    async def log_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            await inter.response.send_modal(LogLeagueModal(discord_id, ign))
+
+        await interaction.response.send_modal(
+            MemberSearchModal(after_pick, title="Log League — pick member")
+        )
+
+    @discord.ui.button(label="🏆 Standings", style=discord.ButtonStyle.secondary, row=0)
+    async def standings_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StandingsSeasonModal())
+
+    @discord.ui.button(label="🔓 Unlock player", style=discord.ButtonStyle.primary, row=1)
+    async def unlock_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        week = _current_week_start()
+        state_rows = get_guild_league_state(str(interaction.guild_id), week)
+        locked = [r for r in state_rows if r.get("is_locked")]
+        if not locked:
+            await interaction.response.send_message(
+                embed=_embed(
+                    "🔒 Nobody Locked",
+                    f"No players are currently locked for week of **{week}**.",
+                    DWG_PINK,
                 ),
                 ephemeral=True,
             )
             return
 
-        lines = [f"• **{p['ign']}** — <@{p['discord_id']}>" for p in remaining[:25]]
-        if len(remaining) > 25:
-            lines.append(f"_… and {len(remaining) - 25} more._")
-        embed = discord.Embed(
-            title=f"⏳ Still Going  ({len(remaining)})",
-            description="\n".join(lines) + f"\n\n_Week of {week}_",
-            color=DWG_PURPLE,
-        )
-        embed.set_footer(text=FOOTER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        as_members = [
+            {"discord_id": r["discord_id"], "ign": r["ign"], "discord_name": ""}
+            for r in locked
+        ]
+        as_members.sort(key=lambda p: (p["ign"] or "").lower())
 
-    @league_g.command(name="resetweek", description="Wipe all lock state for the current week")
-    async def admin_league_resetweek(interaction: discord.Interaction):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            async def do_unlock(confirm_inter: discord.Interaction):
+                set_league_lock(str(confirm_inter.guild_id), discord_id, week, locked=False)
+                await confirm_inter.response.edit_message(
+                    embed=_embed("✓", f"Unlocked **{ign}**.", DWG_MINT),
+                    view=None,
+                )
+                await _send_public(confirm_inter, _embed(
+                    "🔓 Player Unlocked",
+                    f"**{ign}** has been unlocked for week of **{week}** and can run again.",
+                    DWG_MINT,
+                ))
 
+            await inter.response.send_message(
+                embed=_embed(
+                    "⚠️ Confirm Unlock",
+                    f"Unlock **{ign}** for week of **{week}**?\n\nThey'll be able to run again.",
+                    DWG_PURPLE,
+                ),
+                view=ConfirmView(do_unlock, danger_label="Unlock"),
+                ephemeral=True,
+            )
+
+        if len(as_members) <= 25:
+            await interaction.response.send_message(
+                embed=_embed(
+                    f"🔒 Locked This Week ({len(locked)})",
+                    "Pick a player to unlock.",
+                    DWG_PURPLE,
+                ),
+                view=MemberPickView(as_members, after_pick, placeholder="Pick a locked player…"),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_modal(
+                MemberSearchModal(after_pick, title="Unlock — search locked players")
+            )
+
+    @discord.ui.button(label="⏳ Remaining", style=discord.ButtonStyle.secondary, row=1)
+    async def remaining_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         week = _current_week_start()
-        rows = reset_league_week(str(interaction.guild_id), week)
+        all_players = get_all_players(str(interaction.guild_id))
+        state_rows  = get_guild_league_state(str(interaction.guild_id), week)
+        locked_ids  = {r["discord_id"] for r in state_rows if r.get("is_locked")}
+        remaining = [p for p in all_players if p["discord_id"] not in locked_ids]
+        remaining.sort(key=lambda p: (p.get("ign") or "").lower())
+
+        if not remaining:
+            await interaction.response.send_message(
+                embed=_embed("✓", "Posted to channel.", DWG_MINT),
+                ephemeral=True,
+            )
+            await _send_public(interaction, _embed(
+                "✅ All Locked In",
+                f"Everyone has locked in for week of **{week}**! 🌟",
+                DWG_MINT,
+            ))
+            return
+
+        lines = [f"• **{p['ign']}** — <@{p['discord_id']}>" for p in remaining]
+        chunks = _chunk_lines(lines)
+
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="🔄 Week Reset",
-                description=f"Cleared **{rows}** lock entr{'y' if rows == 1 else 'ies'} for week of **{week}**.",
-                color=DWG_MINT,
+            embed=_embed("✓", "Posted to channel.", DWG_MINT),
+            ephemeral=True,
+        )
+        await _send_public(interaction, _embed(
+            f"⏳ Still Going ({len(remaining)})",
+            chunks[0] + f"\n\n_Week of {week}_",
+            DWG_PURPLE,
+        ))
+        for c in chunks[1:]:
+            await _send_public(interaction, _embed("…continued", c, DWG_PURPLE))
+
+    @discord.ui.button(label="🔄 Reset week", style=discord.ButtonStyle.danger, row=1)
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        week = _current_week_start()
+
+        async def do_reset(confirm_inter: discord.Interaction):
+            rows = reset_league_week(str(confirm_inter.guild_id), week)
+            await confirm_inter.response.edit_message(
+                embed=_embed("✓", f"Cleared {rows} lock entr{'y' if rows == 1 else 'ies'}.", DWG_MINT),
+                view=None,
+            )
+            await _send_public(confirm_inter, _embed(
+                "🔄 Week Reset",
+                f"All locks for week of **{week}** have been cleared. The week is open again.",
+                DWG_YELLOW,
+            ))
+
+        await interaction.response.send_message(
+            embed=_embed(
+                "⚠️ Confirm Reset",
+                f"Clear all lock state for week of **{week}**?\n\n_This affects every locked player and can't be undone._",
+                DWG_PINK,
             ),
+            view=ConfirmView(do_reset, danger_label="Reset"),
             ephemeral=True,
         )
 
-    # ────────────────────────────────────────────────────────────────
-    # CONFIG GROUP
-    # ────────────────────────────────────────────────────────────────
 
-    @config_g.command(name="leaderroles", description="Update which roles have leader access")
-    @app_commands.describe(
-        role1="A leader role", role2="Optional 2nd role", role3="Optional 3rd role",
-        role4="Optional 4th role", role5="Optional 5th role",
+# ════════════════════════════════════════════════════════════════════
+# CONFIG PANEL
+# ════════════════════════════════════════════════════════════════════
+
+class _LeaderRolesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Select leader role(s) — up to 5",
+        min_values=1, max_values=5,
     )
-    async def admin_config_leaderroles(interaction: discord.Interaction,
-                                       role1: discord.Role,
-                                       role2: discord.Role = None,
-                                       role3: discord.Role = None,
-                                       role4: discord.Role = None,
-                                       role5: discord.Role = None):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        roles = [r for r in (role1, role2, role3, role4, role5) if r]
-        upsert_guild_config(
-            str(interaction.guild_id),
-            leader_role_ids=[str(r.id) for r in roles],
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        ids = [str(r.id) for r in select.values]
+        upsert_guild_config(str(interaction.guild_id), leader_role_ids=ids)
+        mentions = " ".join(r.mention for r in select.values)
+        await interaction.response.edit_message(
+            embed=_embed("⚙️ Leader Roles Updated", f"Leader access: {mentions}", DWG_MINT),
+            view=None,
         )
-        mentions = " ".join(r.mention for r in roles)
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="⚙️ Leader Roles Updated",
-                description=f"Leader access: {mentions}",
-                color=DWG_MINT,
+
+
+class _SingleRoleView(discord.ui.View):
+    def __init__(self, field: str, label: str):
+        super().__init__(timeout=PANEL_TIMEOUT)
+        self.field = field
+        self.label = label
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Select a role",
+        min_values=1, max_values=1,
+    )
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        role = select.values[0]
+        upsert_guild_config(str(interaction.guild_id), **{self.field: str(role.id)})
+        await interaction.response.edit_message(
+            embed=_embed(
+                f"⚙️ {self.label} Updated",
+                f"{self.label} set to {role.mention}.",
+                DWG_MINT,
             ),
+            view=None,
+        )
+
+
+class ConfigPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="👑 Leader roles", style=discord.ButtonStyle.primary, row=0)
+    async def leaders_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=_embed("👑 Leader Roles", "Pick the role(s) that should have `/admin` access.", DWG_PURPLE),
+            view=_LeaderRolesView(),
             ephemeral=True,
         )
 
-    @config_g.command(name="newrole", description="Update the 'New' role (given before /register)")
-    @app_commands.describe(role="The new 'New' role")
-    async def admin_config_newrole(interaction: discord.Interaction, role: discord.Role):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        upsert_guild_config(str(interaction.guild_id), new_role_id=str(role.id))
+    @discord.ui.button(label="🌱 New role", style=discord.ButtonStyle.secondary, row=0)
+    async def newrole_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="⚙️ New Role Updated",
-                description=f"New-player role set to {role.mention}.",
-                color=DWG_MINT,
-            ),
+            embed=_embed("🌱 New Role", "Pick the role given to players before `/register`.", DWG_PURPLE),
+            view=_SingleRoleView("new_role_id", "New Role"),
             ephemeral=True,
         )
 
-    @config_g.command(name="memberrole", description="Update the 'Member' role (assigned after /register)")
-    @app_commands.describe(role="The new 'Member' role")
-    async def admin_config_memberrole(interaction: discord.Interaction, role: discord.Role):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
-
-        upsert_guild_config(str(interaction.guild_id), member_role_id=str(role.id))
+    @discord.ui.button(label="🌷 Member role", style=discord.ButtonStyle.secondary, row=0)
+    async def memberrole_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            embed=discord.Embed(
-                title="⚙️ Member Role Updated",
-                description=f"Registered-member role set to {role.mention}.",
-                color=DWG_MINT,
-            ),
+            embed=_embed("🌷 Member Role", "Pick the role assigned after `/register`.", DWG_PURPLE),
+            view=_SingleRoleView("member_role_id", "Member Role"),
             ephemeral=True,
         )
 
-    # ────────────────────────────────────────────────────────────────
-    # GUIDE GROUP
-    # ────────────────────────────────────────────────────────────────
 
-    @guide_g.command(name="post", description="Post the bot guide as a series of embeds in a channel")
-    @app_commands.describe(channel="Channel to post the guide in")
-    async def admin_guide_post(interaction: discord.Interaction,
-                               channel: discord.TextChannel):
-        if await reject_if_not_setup(interaction): return
-        if await reject_if_not_leader(interaction): return
+# ════════════════════════════════════════════════════════════════════
+# GUIDE PANEL
+# ════════════════════════════════════════════════════════════════════
 
-        # Defer because sending 5 embeds takes a moment and we may hit rate limits
+def _guide_embeds() -> list[discord.Embed]:
+    welcome = _embed(
+        "🌸 Welcome to Dreamweaving Garden",
+        (
+            "A friendly guild bot for tracking flowers, vases, league, and contributions.\n\n"
+            "**First step for everyone:** run `/register` and enter your in-game name.\n\n"
+            "Below you'll find a quick guide for each command group. "
+            "Use `/help` anytime for a private copy of these embeds."
+        ),
+        DWG_PURPLE,
+    )
+
+    my_embed = _embed(
+        "🌷 /my — your personal collection",
+        (
+            "**Everyone** — track your flowers and vases.\n\n"
+            "• `/my flowers` — see your flowers\n"
+            "• `/my vases` — see your vases\n"
+            "• `/my add flower [name]` — add a flower (autocomplete)\n"
+            "• `/my add vase [name]` — add a vase\n"
+            "• `/my remove flower [name]` — remove one\n"
+            "• `/my remove vase [name]` — remove one\n"
+            "• `/my missing flowers` — what you still need\n"
+            "• `/my missing vases` — what you still need"
+        ),
+        DWG_PINK,
+    )
+
+    lookup_embed = _embed(
+        "🔍 /lookup — find things in the guild",
+        (
+            "**Everyone** — see who has what.\n\n"
+            "• `/lookup flower [name]` — who has this flower\n"
+            "• `/lookup vase [name]` — who has this vase\n"
+            "• `/lookup missing flowers` — flowers nobody has\n"
+            "• `/lookup missing vases` — vases nobody has"
+        ),
+        DWG_BLUE,
+    )
+
+    league_embed = _embed(
+        "🌟 /league — weekly league",
+        (
+            "**Everyone** — coordinate your weekly runs.\n\n"
+            "• `/league call` — rally the guild that league is starting\n"
+            "• `/league lock` — mark yourself done for the week\n"
+            "• `/league preview` — see who's locked in this week"
+        ),
+        DWG_YELLOW,
+    )
+
+    admin_embed = _embed(
+        "⚙️ /admin — leaders only",
+        (
+            "**Leader role required.** Each command opens an interactive panel.\n\n"
+            "• `/admin members` — add, remove, update IGN, list\n"
+            "• `/admin flowers` — override player flowers\n"
+            "• `/admin vases` — override player vases\n"
+            "• `/admin contributions` — log credit + leaderboard\n"
+            "• `/admin league` — log entries, standings, locks, reset\n"
+            "• `/admin config` — update roles after setup\n"
+            "• `/admin guide` — re-post this guide"
+        ),
+        DWG_MINT,
+    )
+
+    return [welcome, my_embed, lookup_embed, league_embed, admin_embed]
+
+
+class _GuideChannelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="Pick the channel to post the guide in…",
+        min_values=1, max_values=1,
+    )
+    async def pick(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = interaction.guild.get_channel(select.values[0].id)
+        if not channel:
+            await interaction.response.edit_message(
+                embed=_embed("❌ Channel not found", "Try again.", DWG_PINK), view=None,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         embeds = _guide_embeds()
@@ -694,23 +1089,166 @@ def register_admin(tree: app_commands.CommandTree) -> None:
                 await channel.send(embed=em)
         except discord.Forbidden:
             await interaction.followup.send(
-                embed=discord.Embed(
-                    description=f"❌ I don't have permission to post in {channel.mention}.",
-                    color=DWG_PINK,
+                embed=_embed(
+                    "❌ Permission Denied",
+                    f"I don't have permission to post in {channel.mention}. "
+                    "Bot needs **View Channel**, **Send Messages**, and **Embed Links**.",
+                    DWG_PINK,
                 ),
                 ephemeral=True,
             )
             return
 
         await interaction.followup.send(
-            embed=discord.Embed(
-                title="📖 Guide Posted",
-                description=(
-                    f"Posted {len(embeds)} guide embeds in {channel.mention}.\n\n"
-                    "_Tip: pin them or use a read-only channel so they stay visible._"
-                ),
-                color=DWG_MINT,
+            embed=_embed(
+                "📖 Guide Posted",
+                f"Posted {len(embeds)} embeds in {channel.mention}.\n\n"
+                "_Tip: pin them or use a read-only channel so they stay visible._",
+                DWG_MINT,
             ),
+            ephemeral=True,
+        )
+
+
+class GuidePanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=PANEL_TIMEOUT)
+
+    @discord.ui.button(label="📖 Post guide", style=discord.ButtonStyle.primary, row=0)
+    async def post_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=_embed(
+                "📖 Post Guide — pick channel",
+                "Pick the channel where the 5 guide embeds should be posted.",
+                DWG_PURPLE,
+            ),
+            view=_GuideChannelView(),
+            ephemeral=True,
+        )
+
+
+# ════════════════════════════════════════════════════════════════════
+# COMMAND REGISTRATION
+# ════════════════════════════════════════════════════════════════════
+
+def register_admin(tree: app_commands.CommandTree) -> None:
+    admin = app_commands.Group(name="admin", description="Leader-only management commands")
+
+    @admin.command(name="members", description="Manage registered members")
+    async def cmd_members(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        count = len(get_all_players(str(interaction.guild_id)))
+        await interaction.response.send_message(
+            embed=_embed(
+                "👥 Members",
+                f"**{count}** registered member{'s' if count != 1 else ''}.\n\nPick an action below:",
+                DWG_PINK,
+            ),
+            view=MembersPanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="flowers", description="Override player flower collections")
+    async def cmd_flowers(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        await interaction.response.send_message(
+            embed=_embed(
+                "🌸 Flowers",
+                "Add or remove a flower from any member's collection.",
+                DWG_PINK,
+            ),
+            view=FlowersPanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="vases", description="Override player vase collections")
+    async def cmd_vases(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        await interaction.response.send_message(
+            embed=_embed(
+                "🏺 Vases",
+                "Add or remove a vase from any member's collection.",
+                DWG_BLUE,
+            ),
+            view=VasesPanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="contributions", description="Log credit and view the leaderboard")
+    async def cmd_contributions(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        await interaction.response.send_message(
+            embed=_embed(
+                "💎 Contributions",
+                "Log an amount for a member or view the leaderboard.",
+                DWG_YELLOW,
+            ),
+            view=ContributionsPanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="league", description="Log entries, view standings, manage locks")
+    async def cmd_league(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        week = _current_week_start()
+        await interaction.response.send_message(
+            embed=_embed(
+                "🌟 League",
+                f"Week of **{week}**. Pick an action below.",
+                DWG_PURPLE,
+            ),
+            view=LeaguePanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="config", description="Update role configuration")
+    async def cmd_config(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+
+        cfg = get_guild_config(str(interaction.guild_id)) or {}
+        import json as _json
+        try:
+            leader_ids = _json.loads(cfg.get("leader_role_ids") or "[]")
+        except Exception:
+            leader_ids = []
+
+        leader_str = " ".join(f"<@&{r}>" for r in leader_ids) if leader_ids else "_not set_"
+        new_str    = f"<@&{cfg['new_role_id']}>"    if cfg.get("new_role_id")    else "_not set_"
+        mem_str    = f"<@&{cfg['member_role_id']}>" if cfg.get("member_role_id") else "_not set_"
+
+        await interaction.response.send_message(
+            embed=_embed(
+                "⚙️ Configuration",
+                (
+                    "**Current settings:**\n"
+                    f"👑 Leader roles: {leader_str}\n"
+                    f"🌱 New role: {new_str}\n"
+                    f"🌷 Member role: {mem_str}\n\n"
+                    "Pick what you'd like to update:"
+                ),
+                DWG_PURPLE,
+            ),
+            view=ConfigPanel(),
+            ephemeral=True,
+        )
+
+    @admin.command(name="guide", description="Post the member-facing help guide")
+    async def cmd_guide(interaction: discord.Interaction):
+        if await reject_if_not_setup(interaction): return
+        if await reject_if_not_leader(interaction): return
+        await interaction.response.send_message(
+            embed=_embed(
+                "📖 Guide",
+                "Post the 5-embed member guide to a channel of your choice.",
+                DWG_MINT,
+            ),
+            view=GuidePanel(),
             ephemeral=True,
         )
 
