@@ -107,12 +107,12 @@ register_admin(tree)
 
 
 # ── DB + Dashboard + Run ───────────────────────────────────────────
-from db.schema import init_db
+from db.queries import init_db
 
 init_db()
 log.info("Database ready.")
 
-from dashboard import start_admin_dashboard
+from admin.dashboard import start_admin_dashboard
 start_admin_dashboard()
 
 bot.run(TOKEN)
