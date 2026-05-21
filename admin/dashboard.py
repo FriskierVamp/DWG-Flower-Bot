@@ -1586,7 +1586,6 @@ function render(){
   }
 
   tbody.innerHTML=rows.map(function(f, idx){
-    var n=JSON.stringify(f.name);
     var i='row'+idx;
     var opts=['Shine','Star','Rare','Fine','Basic'].map(function(r){
       return '<option'+(r===f.rarity?' selected':'')+'>'+r+'</option>';
@@ -1600,10 +1599,10 @@ function render(){
       +'<td><span class="source-tag">'+esc(f.source)+'</span></td>'
       +'<td><div class="actions">'
         +'<button class="btn btn-success btn-sm" onclick="startEdit(\''+i+'\')">Edit</button>'
-        +'<button class="btn btn-danger btn-sm" onclick="startDelete(\''+esc(f.name).replace(/'/g,"\\'")+'\')">Remove</button>'
+        +'<button class="btn btn-danger btn-sm" onclick="startDelete(this)">Remove</button>'
       +'</div></td>'
     +'</tr>'
-    +'<tr class="edit-row" id="edit-'+i+'">'
+    +'<tr class="edit-row" id="edit-'+i+'" data-item-name="'+esc(f.name)+'">'
       +'<td colspan="7"><div class="edit-form">'
         +'<div class="field"><label>Name (locked)</label>'
           +'<input value="'+esc(f.name)+'" disabled style="opacity:.55"/></div>'
@@ -1617,7 +1616,7 @@ function render(){
         +'<div class="field"><label>Source</label>'
           +'<input id="er-'+i+'-source" value="'+esc(f.source)+'" maxlength="100"/></div>'
         +'<div class="field"><label>&nbsp;</label><div class="btn-group">'
-          +'<button class="btn btn-primary btn-sm" onclick="saveEdit(\''+i+'\','+n+')">Save</button>'
+          +'<button class="btn btn-primary btn-sm" onclick="saveEdit(\''+i+'\')">Save</button>'
           +'<button class="btn btn-secondary btn-sm" onclick="closeEdit(\''+i+'\')">Cancel</button>'
         +'</div></div>'
       +'</div>'
@@ -1668,7 +1667,10 @@ function closeEdit(id){
   const row=document.getElementById('edit-'+id);
   if(row) row.classList.remove('open');
 }
-async function saveEdit(id, name){
+async function saveEdit(id){
+  const row=document.getElementById('edit-'+id);
+  const name=row ? row.getAttribute('data-item-name') : '';
+  if(!name){toast('Could not find item name.','err');return;}
   const rarity=document.getElementById('er-'+id+'-rarity').value;
   const pts=parseInt(document.getElementById('er-'+id+'-pts').value)||0;
   const cost=parseInt(document.getElementById('er-'+id+'-cost').value)||0;
@@ -1682,7 +1684,11 @@ async function saveEdit(id, name){
   toast(cfg().updatedMsg(name));await load();
 }
 
-function startDelete(name){
+function startDelete(btn){
+  const mainRow = btn.closest ? btn.closest('tr') : null;
+  const editRow = mainRow ? mainRow.nextElementSibling : null;
+  const name = editRow ? editRow.getAttribute('data-item-name') : null;
+  if(!name){toast('Could not identify item to delete.','err');return;}
   deleteTarget=name;
   const label=cfg().label;
   const icon=activeTab==='flowers'?'🌺':'🏺';
