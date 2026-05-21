@@ -5,12 +5,14 @@ Reusable checks for leader roles, server setup, and registration status.
 """
 
 import discord
-from db.schema import get_leader_role_ids, is_setup_complete
+from db.schema import get_guild_config, get_leader_role_ids
 
 
 # ------------------------------------------------------------------
 # SETUP GUARD
 # Blocks commands in servers that haven't run /setup yet.
+# A guild is considered set up when it has a log_channel_id saved,
+# which is only written at the end of the 3-step /setup wizard.
 # ------------------------------------------------------------------
 
 async def reject_if_not_setup(interaction: discord.Interaction) -> bool:
@@ -22,7 +24,12 @@ async def reject_if_not_setup(interaction: discord.Interaction) -> bool:
         )
         return True
 
-    if not is_setup_complete(str(interaction.guild_id)):
+    cfg = get_guild_config(str(interaction.guild_id))
+    # Treat as set up if we have a log channel (written last in the wizard)
+    # or if setup_complete flag is set (legacy)
+    is_configured = cfg and (cfg.get("log_channel_id") or cfg.get("setup_complete"))
+
+    if not is_configured:
         await interaction.response.send_message(
             embed=discord.Embed(
                 title="⚙️ Server Not Configured",
@@ -53,7 +60,6 @@ async def reject_if_not_in_server(interaction: discord.Interaction) -> bool:
 
 # ------------------------------------------------------------------
 # LEADER GUARD
-# Checks stored role IDs — survives role renames, supports multiple roles.
 # ------------------------------------------------------------------
 
 def is_leader(interaction: discord.Interaction) -> bool:
@@ -70,7 +76,6 @@ def is_leader(interaction: discord.Interaction) -> bool:
 
     leader_ids = get_leader_role_ids(str(interaction.guild_id))
     if not leader_ids:
-        # No roles configured yet — only admins pass (handled above)
         return False
 
     user_role_ids = {role.id for role in interaction.user.roles}
