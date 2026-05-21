@@ -305,6 +305,45 @@ def api_bulk_import_vases():
 
 
 # ------------------------------------------------------------------
+# SERVERS API
+# ------------------------------------------------------------------
+
+@admin_app.route("/api/servers", methods=["GET"])
+@require_login
+def api_get_servers():
+    from db.schema import get_db
+    from db.queries import get_all_players
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT guild_id, guild_name, log_channel_id, created_at FROM guild_config ORDER BY guild_name COLLATE NOCASE"
+        ).fetchall()
+    servers = []
+    for r in rows:
+        d = dict(r)
+        d["member_count"] = len(get_all_players(d["guild_id"]))
+        servers.append(d)
+    return jsonify(servers)
+
+
+@admin_app.route("/api/servers/<guild_id>/members", methods=["GET"])
+@require_login
+def api_get_server_members(guild_id: str):
+    from db.queries import get_all_players, get_player_flowers
+    players = get_all_players(guild_id)
+    result = []
+    for p in players:
+        flowers = get_player_flowers(guild_id, p["discord_id"])
+        result.append({
+            "discord_id":    p["discord_id"],
+            "discord_name":  p.get("discord_name", ""),
+            "ign":           p["ign"],
+            "registered_at": p["registered_at"][:10],
+            "flower_count":  len(flowers),
+        })
+    return jsonify(result)
+
+
+# ------------------------------------------------------------------
 # LOGIN PAGE
 # ------------------------------------------------------------------
 
@@ -781,6 +820,12 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
     </div>
 
     <div class="logo-divider"></div>
+    <div class="sidebar-label">Management</div>
+    <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px">
+      <button class="rpill Basic" id="tab-servers" onclick="switchTab('servers',this)">🌿 Servers</button>
+    </div>
+
+    <div class="logo-divider"></div>
     <div class="sidebar-label">Filter by Rarity</div>
     <div class="rarity-pills">
       <button class="rpill all active" onclick="setFilter('all',this)">
@@ -939,6 +984,96 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
   </main>
 </div>
 
+<!-- SERVERS PANEL (hidden by default, shown when servers tab active) -->
+<div id="serversPanel" style="display:none">
+  <div class="shell">
+    <aside class="sidebar">
+      <div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:4px">
+        <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:44px;height:44px;border-radius:50%;border:2px solid var(--pink-mid);box-shadow:0 2px 8px rgba(240,168,192,.3)"/>
+        <div class="logo">Dreamweaving <span class="accent">Garden</span></div>
+      </div>
+      <div class="logo-sub">✦ Flower Manager ✦</div>
+      <div class="logo-divider"></div>
+      <div class="stat-card">
+        <div class="val" id="sTotal2">—</div>
+        <div class="lbl">Servers</div>
+      </div>
+      <div class="logo-divider"></div>
+      <div class="sidebar-label">Master Lists</div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px">
+        <button class="rpill all" id="tab-flowers2" onclick="switchTab('flowers',document.getElementById('tab-flowers'))">🌸 Flowers</button>
+        <button class="rpill Basic" id="tab-vases2" onclick="switchTab('vases',document.getElementById('tab-vases'))">🏺 Vases</button>
+      </div>
+      <div class="logo-divider"></div>
+      <div class="sidebar-label">Management</div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:8px">
+        <button class="rpill all active" id="tab-servers2">🌿 Servers</button>
+      </div>
+      <div class="logo-divider"></div>
+      <a href="/logout" class="signout">🌿 Sign Out</a>
+    </aside>
+    <main class="main">
+      <div class="banner" style="padding:0;background:none;border:2px solid var(--pink-mid);border-radius:18px;overflow:hidden;box-shadow:0 4px 20px rgba(180,120,80,.12);position:relative;">
+        <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/banner.png" alt="Dreamweaving Garden" style="width:100%;display:block;max-height:180px;object-fit:cover;object-position:center 40%"/>
+        <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 24px;background:linear-gradient(transparent,rgba(253,246,238,.92));border-top:1px solid rgba(240,168,192,.2)">
+          <div style="display:flex;align-items:center;gap:10px">
+            <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
+            <div>
+              <div id="serversBannerTitle" style="font-family:var(--font-d);font-size:1.2rem;font-weight:700;color:var(--text)">🌿 Servers</div>
+              <div id="serversBannerSub" style="font-size:.78rem;color:var(--text2)">Servers using Dreamweaving Garden Bot</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="status-bar" id="serversStatusBar"></div>
+
+      <!-- SERVER LIST VIEW -->
+      <div id="serverListView">
+        <div class="table-wrap" style="margin-top:16px">
+          <table>
+            <thead>
+              <tr>
+                <th>Server Name</th>
+                <th>Guild ID</th>
+                <th>Members</th>
+                <th>Joined</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="serverRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- MEMBER LIST VIEW (shown when a server is clicked) -->
+      <div id="memberListView" style="display:none">
+        <div style="margin-top:16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
+          <button class="btn btn-secondary btn-sm" onclick="showServerList()">← Back to Servers</button>
+          <div>
+            <div style="font-family:var(--font-d);font-size:1.1rem;font-weight:700;color:var(--text)" id="memberServerName"></div>
+            <div style="font-size:.78rem;color:var(--text2)" id="memberServerSub"></div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>IGN</th>
+                <th>Discord Name</th>
+                <th>Discord ID</th>
+                <th>🌸 Flowers</th>
+                <th>Registered</th>
+              </tr>
+            </thead>
+            <tbody id="memberRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
 <!-- DELETE MODAL -->
 <div class="modal-overlay" id="deleteModal">
   <div class="modal">
@@ -1003,20 +1138,105 @@ function updateCalc(){
 function rarityOrder(r){return({'Shine':0,'Star':1,'Rare':2,'Fine':3,'Basic':4}[r]??9)}
 
 function switchTab(tab, el){
+  // servers tab shows a completely different panel
+  if(tab === 'servers'){
+    document.querySelector('.shell').style.display = 'none';
+    document.getElementById('serversPanel').style.display = '';
+    document.querySelectorAll('#tab-flowers,#tab-vases,#tab-servers').forEach(b=>{
+      b.classList.remove('active','all');
+    });
+    el.classList.add('active','all');
+    loadServers();
+    return;
+  }
+  // switching back to master list tabs
+  document.querySelector('.shell').style.display = '';
+  document.getElementById('serversPanel').style.display = 'none';
   activeTab    = tab;
   activeFilter = 'all';
-  document.querySelectorAll('#tab-flowers,#tab-vases').forEach(b=>b.classList.remove('active','all'));
+  document.querySelectorAll('#tab-flowers,#tab-vases,#tab-servers').forEach(b=>b.classList.remove('active','all'));
   el.classList.add('active','all');
-  // update banner + form labels
   document.getElementById('bannerTitle').textContent = cfg().bannerTitle;
   document.getElementById('bannerSub').textContent   = cfg().bannerSub;
   document.getElementById('nameLbl').textContent      = cfg().label+' Name';
   document.getElementById('fName').placeholder        = cfg().namePh;
   resetForm();
-  // reset rarity filter pills to all
   document.querySelectorAll('.rpill').forEach(p=>p.classList.remove('active'));
   document.querySelector('.rpill.all').classList.add('active');
   load();
+}
+
+// ── SERVERS ──────────────────────────────────────────────────────
+
+async function loadServers(){
+  try{
+    const r = await fetch('/api/servers');
+    if(!r.ok) throw new Error('Failed to load servers');
+    const servers = await r.json();
+    document.getElementById('sTotal2').textContent = servers.length;
+    renderServerList(servers);
+  }catch(e){
+    document.getElementById('serversStatusBar').innerHTML =
+      '<div class="toast err">'+e.message+'</div>';
+  }
+}
+
+function renderServerList(servers){
+  showServerList();
+  const tbody = document.getElementById('serverRows');
+  if(!servers.length){
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">🌿</div><p>No servers have run /setup yet.</p></div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = servers.map(function(s){
+    var name = s.guild_name || ('Server '+s.guild_id);
+    var joined = s.created_at ? s.created_at.slice(0,10) : '—';
+    return '<tr>'
+      +'<td><strong>'+esc(name)+'</strong></td>'
+      +'<td style="font-size:.78rem;color:var(--text2);font-family:monospace">'+esc(s.guild_id)+'</td>'
+      +'<td><span class="pts-base">'+s.member_count+'</span></td>'
+      +'<td style="font-size:.82rem;color:var(--text2)">'+joined+'</td>'
+      +'<td><button class="btn btn-secondary btn-sm" onclick="loadMembers(\''+esc(s.guild_id)+'\',\''+esc(name)+'\','+s.member_count+')">View Members</button></td>'
+      +'</tr>';
+  }).join('');
+}
+
+async function loadMembers(guildId, guildName, count){
+  document.getElementById('memberServerName').textContent = guildName;
+  document.getElementById('memberServerSub').textContent  = count+' registered member'+(count!==1?'s':'');
+  document.getElementById('serversBannerTitle').textContent = '🌿 '+guildName;
+  document.getElementById('serversBannerSub').textContent   = count+' registered member'+(count!==1?'s':'');
+  document.getElementById('serverListView').style.display = 'none';
+  document.getElementById('memberListView').style.display = '';
+  const tbody = document.getElementById('memberRows');
+  tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text2)">Loading…</td></tr>';
+  try{
+    const r = await fetch('/api/servers/'+encodeURIComponent(guildId)+'/members');
+    if(!r.ok) throw new Error('Failed to load members');
+    const members = await r.json();
+    if(!members.length){
+      tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">🌱</div><p>No members registered yet.</p></div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = members.map(function(m){
+      return '<tr>'
+        +'<td><strong>'+esc(m.ign)+'</strong></td>'
+        +'<td style="color:var(--text2)">'+esc(m.discord_name||'—')+'</td>'
+        +'<td style="font-size:.78rem;color:var(--text2);font-family:monospace">'+esc(m.discord_id)+'</td>'
+        +'<td><span class="pts-base">'+m.flower_count+'</span></td>'
+        +'<td style="font-size:.82rem;color:var(--text2)">'+esc(m.registered_at)+'</td>'
+        +'</tr>';
+    }).join('');
+  }catch(e){
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--pink-deep)">Error: '+e.message+'</td></tr>';
+  }
+}
+
+function showServerList(){
+  document.getElementById('serverListView').style.display = '';
+  document.getElementById('memberListView').style.display = 'none';
+  document.getElementById('serversBannerTitle').textContent = '🌿 Servers';
+  document.getElementById('serversBannerSub').textContent   = 'Servers using Dreamweaving Garden Bot';
 }
 
 function setFilter(f,el){
