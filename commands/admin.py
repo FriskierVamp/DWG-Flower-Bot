@@ -197,18 +197,25 @@ class MemberSearchModal(discord.ui.Modal):
             )
             return
 
-        if len(matches) == 1:
-            m = matches[0]
-            await self.on_pick(interaction, m["discord_id"], m["ign"])
-            return
+        # Always show a dropdown — even for 1 match — so the follow-up callback
+        # runs from a select interaction, not a modal submit. (Modal submits
+        # can't open another modal, which breaks flows like Update IGN that
+        # need a second modal after picking the member.)
+        title = (
+            f"🔍 Found {len(matches)} matches"
+            if len(matches) > 1 else
+            "🔍 Found 1 match"
+        )
+        sub = (
+            "Pick the right one from the list below."
+            if len(matches) > 1 else
+            "Confirm the member to continue."
+        )
+        if len(matches) > 25:
+            sub += "\n_(Showing first 25 — refine your search if needed.)_"
 
         await interaction.response.send_message(
-            embed=_embed(
-                f"🔍 Found {len(matches)} matches",
-                "Pick the right one from the list below."
-                + ("\n_(Showing first 25 — refine your search if needed.)_" if len(matches) > 25 else ""),
-                DWG_PURPLE,
-            ),
+            embed=_embed(title, sub, DWG_PURPLE),
             view=MemberPickView(matches, self.on_pick),
             ephemeral=True,
         )
