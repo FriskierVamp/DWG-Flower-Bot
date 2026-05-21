@@ -813,9 +813,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
     <!-- BANNER -->
     <div class="banner" style="padding:0;background:none;border:2px solid var(--pink-mid);border-radius:18px;overflow:hidden;box-shadow:0 4px 20px rgba(180,120,80,.12);position:relative;">
       <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/banner.png" alt="Dreamweaving Garden" style="width:100%;display:block;max-height:180px;object-fit:cover;object-position:center 40%"/>
-      <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 24px;
-        background:linear-gradient(transparent,rgba(253,246,238,.92));
-        border-top:1px solid rgba(240,168,192,.2)">
+      <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 24px;background:linear-gradient(transparent,rgba(253,246,238,.92));border-top:1px solid rgba(240,168,192,.2)">
         <div style="display:flex;align-items:center;gap:10px">
           <img src="https://raw.githubusercontent.com/FriskierVamp/DWG-Flower-Bot/main/assets/icon.png" alt="icon" style="width:36px;height:36px;border-radius:50%;border:2px solid var(--pink-mid)"/>
           <div>
@@ -1071,13 +1069,13 @@ function render(){
     return;
   }
 
-  tbody.innerHTML=rows.map(function(f){
+  tbody.innerHTML=rows.map(function(f, idx){
     var n=JSON.stringify(f.name);
-    var e=CSS.escape(f.name);
+    var i='row'+idx;
     var opts=['Shine','Star','Rare','Fine','Basic'].map(function(r){
       return '<option'+(r===f.rarity?' selected':'')+'>'+r+'</option>';
     }).join('');
-    return '<tr id="row-'+e+'">'
+    return '<tr id="main-'+i+'">'
       +'<td><span class="flower-name">'+esc(f.name)+'</span></td>'
       +'<td><span class="rarity-badge '+esc(f.rarity)+'">'+esc(f.rarity)+'</span></td>'
       +'<td><span class="pts-base">'+f.base_points+'</span></td>'
@@ -1085,38 +1083,38 @@ function render(){
       +'<td><span class="diamond">💎</span> '+f.upgrade_cost.toLocaleString()+'</td>'
       +'<td><span class="source-tag">'+esc(f.source)+'</span></td>'
       +'<td><div class="actions">'
-        +'<button class="btn btn-success btn-sm" onclick="startEdit('+n+')">Edit</button>'
+        +'<button class="btn btn-success btn-sm" onclick="startEdit(\''+i+'\')">Edit</button>'
         +'<button class="btn btn-danger btn-sm" onclick="startDelete('+n+')">Remove</button>'
       +'</div></td>'
     +'</tr>'
-    +'<tr class="edit-row" id="edit-'+e+'">'
+    +'<tr class="edit-row" id="edit-'+i+'">'
       +'<td colspan="7"><div class="edit-form">'
         +'<div class="field"><label>Name (locked)</label>'
           +'<input value="'+esc(f.name)+'" disabled style="opacity:.55"/></div>'
         +'<div class="field"><label>Rarity</label>'
-          +'<select id="er-'+e+'-rarity">'+opts+'</select></div>'
+          +'<select id="er-'+i+'-rarity">'+opts+'</select></div>'
         +'<div class="field"><label>Base Points</label>'
-          +'<input id="er-'+e+'-pts" type="number" min="0" value="'+f.base_points+'"'
-          +' oninput="updateEditCalc('+n+')"/></div>'
+          +'<input id="er-'+i+'-pts" type="number" min="0" value="'+f.base_points+'"'
+          +' oninput="updateEditCalc(\''+i+'\')"/></div>'
         +'<div class="field"><label>Upgrade Cost 💎</label>'
-          +'<input id="er-'+e+'-cost" type="number" min="0" value="'+f.upgrade_cost+'"/></div>'
+          +'<input id="er-'+i+'-cost" type="number" min="0" value="'+f.upgrade_cost+'"/></div>'
         +'<div class="field"><label>Source</label>'
-          +'<input id="er-'+e+'-source" value="'+esc(f.source)+'" maxlength="100"/></div>'
+          +'<input id="er-'+i+'-source" value="'+esc(f.source)+'" maxlength="100"/></div>'
         +'<div class="field"><label>&nbsp;</label><div class="btn-group">'
-          +'<button class="btn btn-primary btn-sm" onclick="saveEdit('+n+')">Save</button>'
-          +'<button class="btn btn-secondary btn-sm" onclick="closeEdit('+n+')">Cancel</button>'
+          +'<button class="btn btn-primary btn-sm" onclick="saveEdit(\''+i+'\','+n+')">Save</button>'
+          +'<button class="btn btn-secondary btn-sm" onclick="closeEdit(\''+i+'\')">Cancel</button>'
         +'</div></div>'
       +'</div>'
       +'<div style="margin-top:10px;font-size:.77rem;color:var(--text2)">'
-        +'Upgraded: <span id="er-'+e+'-calc" style="color:var(--wood);font-weight:600">'+(f.base_points*2)+' pts</span>'
+        +'Upgraded: <span id="er-'+i+'-calc" style="color:var(--wood);font-weight:600">'+(f.base_points*2)+' pts</span>'
       +'</div></td>'
     +'</tr>';
   }).join('');
 }
 
-function updateEditCalc(name){
-  const pts=parseInt(document.getElementById('er-'+CSS.escape(name)+'-pts').value)||0;
-  document.getElementById('er-'+CSS.escape(name)+'-calc').textContent=(pts*2)+' pts';
+function updateEditCalc(id){
+  const pts=parseInt(document.getElementById('er-'+id+'-pts').value)||0;
+  document.getElementById('er-'+id+'-calc').textContent=(pts*2)+' pts';
 }
 
 async function submitForm(){
@@ -1145,20 +1143,20 @@ function resetForm(){
 }
 function cancelEdit(){resetForm()}
 
-function startEdit(name){
+function startEdit(id){
   document.querySelectorAll('.edit-row.open').forEach(r=>r.classList.remove('open'));
-  const row=document.getElementById('edit-'+CSS.escape(name));
+  const row=document.getElementById('edit-'+id);
   if(row) row.classList.add('open');
 }
-function closeEdit(name){
-  const row=document.getElementById('edit-'+CSS.escape(name));
+function closeEdit(id){
+  const row=document.getElementById('edit-'+id);
   if(row) row.classList.remove('open');
 }
-async function saveEdit(name){
-  const rarity=document.getElementById('er-'+CSS.escape(name)+'-rarity').value;
-  const pts=parseInt(document.getElementById('er-'+CSS.escape(name)+'-pts').value)||0;
-  const cost=parseInt(document.getElementById('er-'+CSS.escape(name)+'-cost').value)||0;
-  const source=document.getElementById('er-'+CSS.escape(name)+'-source').value.trim()||'Unknown';
+async function saveEdit(id, name){
+  const rarity=document.getElementById('er-'+id+'-rarity').value;
+  const pts=parseInt(document.getElementById('er-'+id+'-pts').value)||0;
+  const cost=parseInt(document.getElementById('er-'+id+'-cost').value)||0;
+  const source=document.getElementById('er-'+id+'-source').value.trim()||'Unknown';
   const r=await fetch(API(cfg().api+'/'+encodeURIComponent(name)),{
     method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})
