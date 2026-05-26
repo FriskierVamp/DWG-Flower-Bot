@@ -543,3 +543,73 @@ def reset_league_week(guild_id: str, week_start: str) -> int:
             (str(guild_id), week_start),
         )
         return cur.rowcount
+
+
+# ------------------------------------------------------------------
+# LEAGUE CALL — top flowers for the call announcement
+# ------------------------------------------------------------------
+
+def get_top_flowers_for_league_call(guild_id: str, top_n: int = 2) -> list[dict]:
+    """
+    Return the top N distinct flowers (by effective points) held by any player
+    in the guild, along with all players who hold each flower and whether they
+    have it upgraded.
+
+    Each returned dict has:
+        flower_name   str
+        base_points   int
+        effective_pts int   (base_points * 2 if upgraded, else base_points)
+        is_upgraded   bool
+        holders       list[dict]  — each: {discord_id, ign, discord_name}
+        other_holders list[dict]  — same shape; same flower, different upgrade status
+                                    (present so the caller can mention them separately)
+    """
+    with get_db() as conn:
+        # Pull every (player, flower, upgrade-status, points) combo for this guild
+        rows = conn.execute(
+            """
+            SELECT
+                pf.discord_id,
+                pf.flower_name,
+                pf.is_upgraded,
+                CASE WHEN pf.is_upgraded THEN f.base_points * 2
+                     ELSE f.base_points END AS effective_pts,
+                f.base_points,
+                p.ign,
+                p.discord_name
+            FROM player_flowers pf
+            JOIN flowers f ON f.name = pf.flower_name
+            JOIN players p ON p.guild_id = pf.guild_id AND p.discord_id = pf.discord_id
+            WHERE pf.guild_id = ?
+            ORDER BY effective_pts DESC, pf.flower_name COLLATE NOCASE
+            """,
+            (str(guild_id),),
+        ).fetchall()
+
+    # Group by (flower_name, is_upgraded) to find unique scoring combos
+    from collections import defaultdict
+    combos: dict[tuple, dict] = {}  # (flower_name, is_upgraded) -> aggregated entry
+
+    for row in rows:
+        key = (row["flower_name"], bool(row["is_upgraded"]))
+        if key not in combos:
+            combos[key] = {
+                "flower_name":   row["flower_name"],
+                "base_points":   row["base_points"],
+                "effective_pts": row["effective_pts"],
+                "is_upgraded":   bool(row["is_upgraded"]),
+                "holders":       [],
+            }
+        combos[key]["holders"].append({
+            "discord_id":   row["discord_id"],
+            "ign":          row["ign"],
+            "discord_name": row["discord_name"],
+        })
+
+    # Sort combos by effective_pts descending, then flower name for stability
+    sorted_combos = sorted(
+        combos.values(),
+        key=lambda c: (-c["effective_pts"], c["flower_name"].lower()),
+    )
+
+    return sorted_combos[:top_n]

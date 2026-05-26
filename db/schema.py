@@ -108,6 +108,7 @@ def init_db() -> None:
         guild_id        TEXT NOT NULL,
         discord_id      TEXT NOT NULL,
         flower_name     TEXT NOT NULL,
+        is_upgraded     INTEGER NOT NULL DEFAULT 0,
         source_type     TEXT NOT NULL DEFAULT 'manual',
         logged_by       TEXT,
         logged_at       TEXT NOT NULL DEFAULT (datetime('now')),
@@ -194,6 +195,15 @@ def init_db() -> None:
     )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ls_guild ON league_state(guild_id, week_start)")
+
+    # ------------------------------------------------------------------
+    # MIGRATIONS — safe to run on existing databases
+    # ------------------------------------------------------------------
+    # Add is_upgraded to player_flowers if it does not exist yet
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(player_flowers)")}
+    if "is_upgraded" not in existing_cols:
+        cur.execute("ALTER TABLE player_flowers ADD COLUMN is_upgraded INTEGER NOT NULL DEFAULT 0")
+        log.info("Migration: added is_upgraded column to player_flowers")
 
     conn.commit()
     conn.close()
