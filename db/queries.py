@@ -613,3 +613,123 @@ def get_top_flowers_for_league_call(guild_id: str, top_n: int = 2) -> list[dict]
     )
 
     return sorted_combos[:top_n]
+
+
+# ------------------------------------------------------------------
+# LEAGUE CALL — classify holders of a chosen flower by where it ranks
+# ------------------------------------------------------------------
+
+def get_league_call_holders(guild_id: str, flower_name: str, is_upgraded: bool) -> dict:
+    """
+    For a chosen flower + upgrade tier, find every guild member who owns it,
+    then rank it against each person's full flower collection to classify them:
+
+      best        — this flower is their single highest-scoring flower (ping)
+      second_best — this flower ties or ranks 2nd in their collection (ping)
+      rest        — they own it but it falls below their top 2 (list only)
+
+    The chosen flower's effective_pts = base_points * 2 if is_upgraded else base_points.
+    Each holder's other flowers are scored at their own upgrade status.
+
+    Returns:
+        {
+            "flower_name":   str,
+            "base_points":   int,
+            "effective_pts": int,
+            "is_upgraded":   bool,
+            "best":          list[dict],   # {discord_id, ign, discord_name}
+            "second_best":   list[dict],
+            "rest":          list[dict],
+        }
+    """
+    with get_db() as conn:
+        # 1. Resolve the chosen flower's base points
+        flower_row = conn.execute(
+            "SELECT base_points FROM flowers WHERE LOWER(name) = LOWER(?)",
+            (flower_name.strip(),),
+        ).fetchone()
+        if not flower_row:
+            return {}
+
+        base_pts     = flower_row["base_points"]
+        chosen_pts   = base_pts * 2 if is_upgraded else base_pts
+
+        # 2. Pull every (player, flower, effective_pts) for the guild in one query
+        all_rows = conn.execute(
+            """
+            SELECT
+                pf.discord_id,
+                pf.flower_name,
+                pf.is_upgraded,
+                CASE WHEN pf.is_upgraded THEN f.base_points * 2
+                     ELSE f.base_points END AS effective_pts,
+                p.ign,
+                p.discord_name
+            FROM player_flowers pf
+            JOIN flowers f ON f.name = pf.flower_name
+            JOIN players p
+              ON p.guild_id = pf.guild_id AND p.discord_id = pf.discord_id
+            WHERE pf.guild_id = ?
+            """,
+            (str(guild_id),),
+        ).fetchall()
+
+    # 3. Find everyone who owns the chosen flower at the chosen upgrade status
+    holders = {
+        r["discord_id"]: {"discord_id": r["discord_id"], "ign": r["ign"], "discord_name": r["discord_name"]}
+        for r in all_rows
+        if r["flower_name"].lower() == flower_name.strip().lower()
+        and bool(r["is_upgraded"]) == is_upgraded
+    }
+
+    if not holders:
+        return {
+            "flower_name":   flower_name,
+            "base_points":   base_pts,
+            "effective_pts": chosen_pts,
+            "is_upgraded":   is_upgraded,
+            "best":          [],
+            "second_best":   [],
+            "rest":          [],
+        }
+
+    # 4. For each holder, build a sorted list of their flower points and find
+    #    where chosen_pts ranks (1st or 2nd)
+    from collections import defaultdict
+    player_scores: dict[str, list[int]] = defaultdict(list)
+    for r in all_rows:
+        if r["discord_id"] in holders:
+            player_scores[r["discord_id"]].append(r["effective_pts"])
+
+    best, second_best, rest = [], [], []
+
+    for discord_id, player in holders.items():
+        scores = sorted(player_scores[discord_id], reverse=True)
+        # scores[0] = their best, scores[1] = second best (if exists)
+        if not scores:
+            rest.append(player)
+            continue
+
+        top1 = scores[0]
+        top2 = scores[1] if len(scores) > 1 else None
+
+        if chosen_pts >= top1:
+            # It IS their best (or tied for best)
+            best.append(player)
+        elif top2 is not None and chosen_pts >= top2:
+            # It's their second best (or tied for second)
+            second_best.append(player)
+        else:
+            rest.append(player)
+
+    # Sort each group by IGN
+    key = lambda p: p["ign"].lower()
+    return {
+        "flower_name":   flower_name,
+        "base_points":   base_pts,
+        "effective_pts": chosen_pts,
+        "is_upgraded":   is_upgraded,
+        "best":          sorted(best, key=key),
+        "second_best":   sorted(second_best, key=key),
+        "rest":          sorted(rest, key=key),
+    }
