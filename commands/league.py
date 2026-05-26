@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 from db.queries import (
     set_league_lock, get_guild_league_state, get_league_state,
+    get_top_flowers_for_league_call,
 )
 from utils.guards import reject_if_not_setup, reject_if_not_registered
 
@@ -76,19 +77,61 @@ def register_league(tree: app_commands.CommandTree) -> None:
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
+        guild_id = str(interaction.guild_id)
+        top = get_top_flowers_for_league_call(guild_id, top_n=2)
+
+        # ── Build the ping line and embed body ─────────────────────
+        ping_ids:  list[str] = []   # discord IDs to hard-ping (first holder of each tier)
+        body_lines: list[str] = []
+
+        tier_labels = ["🌸 **Best flower**", "🌼 **Second-best flower**"]
+
+        for i, entry in enumerate(top):
+            flower   = entry["flower_name"]
+            pts      = entry["effective_pts"]
+            upgraded = entry["is_upgraded"]
+            holders  = entry["holders"]
+
+            label    = tier_labels[i] if i < len(tier_labels) else f"**#{i+1} flower**"
+            upgrade_tag = "✨ *Upgraded*" if upgraded else "🌱 *Regular*"
+            pt_str   = f"{pts} pts" + (" (×2)" if upgraded else "")
+
+            # First holder gets a hard ping; the rest are mentioned by IGN only
+            first    = holders[0]
+            rest     = holders[1:]
+
+            ping_ids.append(first["discord_id"])
+
+            mention_first = f"<@{first['discord_id']}>"
+            rest_names    = ", ".join(h["ign"] for h in rest)
+
+            line = f"{label} — **{flower}** ({pt_str}) {upgrade_tag}\n  → {mention_first}"
+            if rest_names:
+                line += f"  *(also held by: {rest_names})*"
+            body_lines.append(line)
+
+        if not body_lines:
+            body_lines = ["_No flower data found yet — get registering!_"]
+
+        ping_content = " ".join(f"<@{did}>" for did in ping_ids) if ping_ids else "@here"
+
+        desc = (
+            f"{interaction.user.mention} is calling the guild \u2014 **league time!**\n\n"
+            + "\n\n".join(body_lines)
+            + "\n\nLock in your runs with `/league lock` once you're done. \U0001f338"
+        )
+
         embed = discord.Embed(
             title="🌟 League Call!",
-            description=(
-                f"{interaction.user.mention} is calling the guild — **league time!**\n\n"
-                "Lock in your runs with `/league lock` once you're done."
-            ),
+            description=desc,
             color=DWG_YELLOW,
         )
         embed.set_footer(text=FOOTER)
+
         await interaction.response.send_message(
-            content="@here",
+            content=ping_content,
             embed=embed,
-            allowed_mentions=discord.AllowedMentions(everyone=True),
+            allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     # ── /league preview ────────────────────────────────────────────
