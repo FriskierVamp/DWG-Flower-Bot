@@ -14,7 +14,7 @@ import discord
 from discord import app_commands
 from db.queries import (
     set_league_lock, get_guild_league_state, get_league_state,
-    get_top_flowers_for_league_call,
+    get_flower_names_for_autocomplete, get_league_call_holders,
 )
 from utils.guards import reject_if_not_setup, reject_if_not_registered
 
@@ -72,53 +72,89 @@ def register_league(tree: app_commands.CommandTree) -> None:
         )
 
     # ── /league call ───────────────────────────────────────────────
-    @league.command(name="call", description="Announce that league has started — rally the guild!")
-    async def league_call(interaction: discord.Interaction):
+    async def flower_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        names = get_flower_names_for_autocomplete()
+        return [
+            app_commands.Choice(name=n, value=n)
+            for n in names
+            if current.lower() in n.lower()
+        ][:25]
+
+    @league.command(name="call", description="Call the league — pick a flower and its tier to rally holders")
+    @app_commands.describe(
+        flower="The flower being called for this league run",
+        upgraded="Is the flower upgraded? Upgraded = double points",
+    )
+    @app_commands.autocomplete(flower=flower_autocomplete)
+    @app_commands.choices(upgraded=[
+        app_commands.Choice(name="Regular", value=0),
+        app_commands.Choice(name="Upgraded (×2 points)", value=1),
+    ])
+    async def league_call(
+        interaction: discord.Interaction,
+        flower: str,
+        upgraded: app_commands.Choice[int],
+    ):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
-        guild_id = str(interaction.guild_id)
-        top = get_top_flowers_for_league_call(guild_id, top_n=2)
+        is_upgraded = bool(upgraded.value)
+        guild_id    = str(interaction.guild_id)
 
-        # ── Build the ping line and embed body ─────────────────────
-        ping_ids:  list[str] = []   # discord IDs to hard-ping (first holder of each tier)
-        body_lines: list[str] = []
+        data = get_league_call_holders(guild_id, flower, is_upgraded)
 
-        tier_labels = ["🌸 **Best flower**", "🌼 **Second-best flower**"]
+        if not data:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"❌ Flower **{flower}** not found in the database.",
+                    color=DWG_PINK,
+                ),
+                ephemeral=True,
+            )
+            return
 
-        for i, entry in enumerate(top):
-            flower   = entry["flower_name"]
-            pts      = entry["effective_pts"]
-            upgraded = entry["is_upgraded"]
-            holders  = entry["holders"]
+        pts         = data["effective_pts"]
+        base_pts    = data["base_points"]
+        best        = data["best"]
+        second_best = data["second_best"]
+        rest        = data["rest"]
 
-            label    = tier_labels[i] if i < len(tier_labels) else f"**#{i+1} flower**"
-            upgrade_tag = "✨ *Upgraded*" if upgraded else "🌱 *Regular*"
-            pt_str   = f"{pts} pts" + (" (×2)" if upgraded else "")
+        upgrade_label = "✨ Upgraded" if is_upgraded else "🌱 Regular"
+        pt_label      = f"{pts} pts" + (" (×2)" if is_upgraded else "")
 
-            # First holder gets a hard ping; the rest are mentioned by IGN only
-            first    = holders[0]
-            rest     = holders[1:]
+        # ── Pings: everyone in best + second_best gets tagged ──────
+        ping_ids = [p["discord_id"] for p in best + second_best]
+        ping_content = " ".join(f"<@{did}>" for did in ping_ids) if ping_ids else ""
 
-            ping_ids.append(first["discord_id"])
+        # ── Build embed body ────────────────────────────────────────
+        lines = []
 
-            mention_first = f"<@{first['discord_id']}>"
-            rest_names    = ", ".join(h["ign"] for h in rest)
+        if best:
+            mentions = " ".join(f"<@{p['discord_id']}>" for p in best)
+            lines.append(f"🌸 **Best flower** — {mentions}")
+        else:
+            lines.append("🌸 **Best flower** — _no one has this as their top flower_")
 
-            line = f"{label} — **{flower}** ({pt_str}) {upgrade_tag}\n  → {mention_first}"
-            if rest_names:
-                line += f"  *(also held by: {rest_names})*"
-            body_lines.append(line)
+        if second_best:
+            mentions = " ".join(f"<@{p['discord_id']}>" for p in second_best)
+            lines.append(f"🌼 **Second-best flower** — {mentions}")
+        else:
+            lines.append("🌼 **Second-best flower** — _no one has this as their second flower_")
 
-        if not body_lines:
-            body_lines = ["_No flower data found yet — get registering!_"]
+        if rest:
+            names = ", ".join(p["ign"] for p in rest)
+            lines.append(f"🌿 **Also have it** — {names}")
 
-        ping_content = " ".join(f"<@{did}>" for did in ping_ids) if ping_ids else "@here"
+        if not (best or second_best or rest):
+            lines.append("_No one in the guild has this flower yet._")
 
         desc = (
-            f"{interaction.user.mention} is calling the guild \u2014 **league time!**\n\n"
-            + "\n\n".join(body_lines)
-            + "\n\nLock in your runs with `/league lock` once you're done. \U0001f338"
+            f"{interaction.user.mention} is calling **{flower}** ({upgrade_label} · {pt_label})\n\n"
+            + "\n".join(lines)
+            + "\n\nLock in your runs with `/league lock` once you\'re done. 🌸"
         )
 
         embed = discord.Embed(
@@ -129,7 +165,7 @@ def register_league(tree: app_commands.CommandTree) -> None:
         embed.set_footer(text=FOOTER)
 
         await interaction.response.send_message(
-            content=ping_content,
+            content=ping_content or None,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
