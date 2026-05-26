@@ -151,14 +151,10 @@ def register_league(tree: app_commands.CommandTree) -> None:
         if not (best or second_best or rest):
             lines.append("_No one in the guild has this flower yet._")
 
-        desc = (
-            f"{interaction.user.mention} is calling **{flower}** ({upgrade_label} · {pt_label})\n\n"
-            + "\n".join(lines)
-            + "\n\nLock in your runs with `/league lock` once you\'re done. 🌸"
-        )
+        desc = "\n".join(lines)
 
         embed = discord.Embed(
-            title="🌟 League Call!",
+            title=f"🌟 {flower} — {upgrade_label} · {pt_label}",
             description=desc,
             color=DWG_YELLOW,
         )
