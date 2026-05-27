@@ -679,7 +679,6 @@ def get_league_call_holders(guild_id: str, flower_name: str, is_upgraded: bool) 
         r["discord_id"]: {"discord_id": r["discord_id"], "ign": r["ign"], "discord_name": r["discord_name"]}
         for r in all_rows
         if r["flower_name"].lower() == flower_name.strip().lower()
-        and bool(r["is_upgraded"]) == is_upgraded
     }
 
     if not holders:
