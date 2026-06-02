@@ -56,6 +56,7 @@ def init_db() -> None:
         discord_id      TEXT NOT NULL,
         discord_name    TEXT,
         ign             TEXT NOT NULL,
+        is_vip          INTEGER NOT NULL DEFAULT 0,
         registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE(guild_id, discord_id)
     )
@@ -204,6 +205,11 @@ def init_db() -> None:
     if "is_upgraded" not in existing_cols:
         cur.execute("ALTER TABLE player_flowers ADD COLUMN is_upgraded INTEGER NOT NULL DEFAULT 0")
         log.info("Migration: added is_upgraded column to player_flowers")
+
+    player_cols = {row[1] for row in cur.execute("PRAGMA table_info(players)")}
+    if "is_vip" not in player_cols:
+        cur.execute("ALTER TABLE players ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0")
+        log.info("Migration: added is_vip column to players")
 
     conn.commit()
     conn.close()

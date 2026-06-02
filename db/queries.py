@@ -73,6 +73,24 @@ def update_player_ign(guild_id: str, discord_id: str, new_ign: str) -> bool:
         return cur.rowcount > 0
 
 
+def set_player_vip(guild_id: str, discord_id: str, is_vip: bool) -> bool:
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE players SET is_vip = ? WHERE guild_id = ? AND discord_id = ?",
+            (1 if is_vip else 0, str(guild_id), str(discord_id)),
+        )
+        return cur.rowcount > 0
+
+
+def get_player_vip(guild_id: str, discord_id: str) -> bool:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT is_vip FROM players WHERE guild_id = ? AND discord_id = ?",
+            (str(guild_id), str(discord_id)),
+        ).fetchone()
+        return bool(row["is_vip"]) if row else False
+
+
 # ------------------------------------------------------------------
 # FLOWERS (master list — global, not per-guild)
 # ------------------------------------------------------------------

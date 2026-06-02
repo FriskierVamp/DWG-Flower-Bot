@@ -15,6 +15,8 @@ from discord import app_commands
 from db.queries import (
     set_league_lock, get_guild_league_state, get_league_state,
     get_flower_names_for_autocomplete, get_league_call_holders,
+    get_player_vip, get_league_call_holders,
+    find_flower_match,
 )
 from utils.guards import reject_if_not_setup, reject_if_not_registered
 
@@ -37,15 +39,16 @@ def register_league(tree: app_commands.CommandTree) -> None:
     league = app_commands.Group(name="league", description="Weekly league interactions")
 
     # ── /league lock ───────────────────────────────────────────────
-    @league.command(name="lock", description="Mark yourself as done for the current league week")
+    @league.command(name="lock", description="Mark yourself as done for this league week")
     async def league_lock(interaction: discord.Interaction):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
-        week = _current_week_start()
-        existing = get_league_state(
-            str(interaction.guild_id), str(interaction.user.id), week,
-        )
+        guild_id   = str(interaction.guild_id)
+        discord_id = str(interaction.user.id)
+        week       = _current_week_start()
+
+        existing = get_league_state(guild_id, discord_id, week)
         if existing and existing.get("is_locked"):
             await interaction.response.send_message(
                 embed=discord.Embed(
@@ -56,15 +59,18 @@ def register_league(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        set_league_lock(
-            str(interaction.guild_id), str(interaction.user.id), week, locked=True,
-        )
+        is_vip     = get_player_vip(guild_id, discord_id)
+        lock_tier  = 26 if is_vip else 21
+        vip_note   = " _(VIP)_" if is_vip else ""
+
+        set_league_lock(guild_id, discord_id, week, locked=True)
+
         await interaction.response.send_message(
             embed=discord.Embed(
                 title="🔒 Locked In",
                 description=(
-                    f"{interaction.user.mention} is **done for week of {week}**.\n"
-                    "Good luck! 🌸"
+                    f"{interaction.user.mention} has locked at **{lock_tier} tasks**{vip_note}.\n"
+                    f"You're done for the week — great work! 🌸"
                 ),
                 color=DWG_MINT,
             ),
@@ -122,77 +128,157 @@ def register_league(tree: app_commands.CommandTree) -> None:
         second_best = data["second_best"]
         rest        = data["rest"]
 
-        upgrade_label = "✨ Upgraded" if is_upgraded else "🌱 Regular"
-        pt_label      = f"{pts} pts" + (" (×2)" if is_upgraded else "")
+        SEP = "─" * 28
 
-        # ── Pings: everyone in best + second_best gets tagged ──────
-        ping_ids = [p["discord_id"] for p in best + second_best]
-        ping_content = " ".join(f"<@{did}>" for did in ping_ids) if ping_ids else ""
+        if is_upgraded:
+            title_line    = f"🌟 **{flower}**"
+            upgraded_line = f"🚨 UPGRADED 🚨 · {pts} pts"
+            color         = discord.Color(0xFF4500)   # vivid orange-red for urgency
+        else:
+            title_line    = f"🌸 **{flower}**"
+            upgraded_line = f"Regular · {pts} pts"
+            color         = DWG_YELLOW
 
-        # ── Build embed body ────────────────────────────────────────
-        lines = []
+        # ── Build sections ──────────────────────────────────────────
+        def mention_list(group):
+            return ", ".join(f"<@{p['discord_id']}>" for p in group)
+
+        def ign_list(group):
+            return ", ".join(p["ign"] for p in group)
+
+        sections = []
 
         if best:
-            mentions = " ".join(f"<@{p['discord_id']}>" for p in best)
-            lines.append(f"🌸 **Best flower** — {mentions}")
+            sections.append(f"🌸 **Best Flower**\n{mention_list(best)}")
         else:
-            lines.append("🌸 **Best flower** — _no one has this as their top flower_")
+            sections.append("🌸 **Best Flower**\n_None_")
 
         if second_best:
-            mentions = " ".join(f"<@{p['discord_id']}>" for p in second_best)
-            lines.append(f"🌼 **Second-best flower** — {mentions}")
+            sections.append(f"🌼 **Second Best**\n{mention_list(second_best)}")
         else:
-            lines.append("🌼 **Second-best flower** — _no one has this as their second flower_")
+            sections.append("🌼 **Second Best**\n_None_")
 
         if rest:
-            names = ", ".join(p["ign"] for p in rest)
-            lines.append(f"🌿 **Also have it** — {names}")
+            sections.append(f"🌿 **Also Have It**\n{ign_list(rest)}")
 
-        if not (best or second_best or rest):
-            lines.append("_No one in the guild has this flower yet._")
-
-        desc = "\n".join(lines)
-
-        embed = discord.Embed(
-            title=f"🌟 {flower} — {upgrade_label} · {pt_label}",
-            description=desc,
-            color=DWG_YELLOW,
+        desc = (
+            f"{title_line}\n"
+            f"{upgraded_line}\n"
+            f"{SEP}\n\n"
+            + "\n\n".join(sections)
+            + f"\n\n{SEP}"
         )
+
+        embed = discord.Embed(description=desc, color=color)
         embed.set_footer(text=FOOTER)
 
         await interaction.response.send_message(
-            content=ping_content or None,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     # ── /league preview ────────────────────────────────────────────
-    @league.command(name="preview", description="See who has locked in for the current week")
-    async def league_preview(interaction: discord.Interaction):
+    async def preview_flower_autocomplete(
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        names = get_flower_names_for_autocomplete()
+        return [
+            app_commands.Choice(name=n, value=n)
+            for n in names
+            if current.lower() in n.lower()
+        ][:25]
+
+    @league.command(name="preview", description="Privately preview whether a league flower call is worth posting")
+    @app_commands.describe(
+        flower="The flower you are considering calling",
+        upgraded="Is the flower upgraded? Upgraded = double points",
+    )
+    @app_commands.autocomplete(flower=preview_flower_autocomplete)
+    @app_commands.choices(upgraded=[
+        app_commands.Choice(name="Regular", value=0),
+        app_commands.Choice(name="Upgraded (×2 points)", value=1),
+    ])
+    async def league_preview(
+        interaction: discord.Interaction,
+        flower: str,
+        upgraded: app_commands.Choice[int],
+    ):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
-        week = _current_week_start()
-        rows = get_guild_league_state(str(interaction.guild_id), week)
-        locked   = [r for r in rows if r.get("is_locked")]
-        unlocked = [r for r in rows if not r.get("is_locked")]
+        is_upgraded = bool(upgraded.value)
+        guild_id    = str(interaction.guild_id)
 
-        body_lines = [f"**Week of {week}**\n"]
-        if locked:
-            body_lines.append(f"🔒 **Locked in ({len(locked)})**")
-            body_lines.extend(f"• {r['ign']}" for r in locked[:25])
-            if len(locked) > 25:
-                body_lines.append(f"_… and {len(locked) - 25} more._")
+        matched = find_flower_match(flower)
+        if not matched:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"❌ Flower **{flower}** not found.",
+                    color=DWG_PINK,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        data = get_league_call_holders(guild_id, matched, is_upgraded)
+        if not data:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"❌ No data found for **{matched}**.",
+                    color=DWG_PINK,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        best        = data["best"]
+        second_best = data["second_best"]
+        rest        = data["rest"]
+        pts         = data["effective_pts"]
+        upgrade_label = "✨ Upgraded" if is_upgraded else "🌱 Regular"
+
+        total_tagged = len(best) + len(second_best)
+        total_have   = total_tagged + len(rest)
+
+        if total_have == 0:
+            recommendation = "Probably not — no one in this guild has this flower."
+        elif total_tagged > 0:
+            recommendation = "Yes — at least one player would be pinged."
         else:
-            body_lines.append("_No one has locked in yet._")
+            recommendation = "Maybe — players have it but it is not their top 2 flower."
 
-        if unlocked:
-            body_lines.append(f"\n🌱 **Still going ({len(unlocked)})**")
-            body_lines.extend(f"• {r['ign']}" for r in unlocked[:25])
+        SEP = "─" * 28
+        lines = [
+            f"**{matched}** · {upgrade_label} · {pts} pts",
+            SEP,
+            f"🌸 **Best Flower:** {len(best)}",
+            f"🌼 **Second Best:** {len(second_best)}",
+            f"🌿 **Also Have It:** {len(rest)}",
+            "",
+            f"**Worth posting?** {recommendation}",
+        ]
+
+        if best:
+            lines.append("")
+            lines.append("🌸 **Best Flower:**")
+            lines.append(", ".join(p["ign"] for p in best))
+
+        if second_best:
+            lines.append("")
+            lines.append("🌼 **Second Best:**")
+            lines.append(", ".join(p["ign"] for p in second_best))
+
+        if rest:
+            lines.append("")
+            lines.append("🌿 **Also Have It:**")
+            lines.append(", ".join(p["ign"] for p in rest))
+
+        lines.append(SEP)
 
         embed = discord.Embed(
-            title="🌸 League Preview",
-            description="\n".join(body_lines),
+            title=f"👁️ League Preview",
+            description="\n".join(lines),
             color=DWG_PURPLE,
         )
         embed.set_footer(text=FOOTER)

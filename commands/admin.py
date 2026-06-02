@@ -27,6 +27,7 @@ from discord import app_commands
 from db.queries import (
     register_player, remove_player, update_player_ign,
     get_all_players, find_player, find_player_by_ign,
+    set_player_vip, get_player_vip,
     add_player_flower, remove_player_flower, get_player_flowers,
     add_player_vase,   remove_player_vase,   get_player_vases,
     find_flower_match, find_vase_match,
@@ -453,6 +454,29 @@ class MembersPanel(discord.ui.View):
         await interaction.response.send_message(embed=first, ephemeral=True)
         for c in chunks[1:]:
             await interaction.followup.send(embed=_embed("…continued", c, DWG_BLUE), ephemeral=True)
+
+    @discord.ui.button(label="⭐ Toggle VIP", style=discord.ButtonStyle.primary, row=2)
+    async def vip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async def after_pick(inter: discord.Interaction, discord_id: str, ign: str):
+            guild_id   = str(inter.guild_id)
+            current    = get_player_vip(guild_id, discord_id)
+            new_status = not current
+            set_player_vip(guild_id, discord_id, new_status)
+            status_str = "**VIP**" if new_status else "**Regular**"
+            emoji      = "⭐" if new_status else "🌱"
+            await inter.response.send_message(
+                embed=_embed(
+                    f"{emoji} VIP Updated",
+                    f"**{ign}** is now {status_str}.\n"
+                    f"{'They can lock at 26 tasks.' if new_status else 'They can lock at 21 tasks.'}",
+                    DWG_MINT,
+                ),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_modal(
+            MemberSearchModal(after_pick, title="Toggle VIP — pick member")
+        )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1045,9 +1069,10 @@ def _guide_embeds() -> list[discord.Embed]:
         "🌟 /league — weekly league",
         (
             "**Everyone** — coordinate your weekly runs.\n\n"
-            "• `/league call` — rally the guild that league is starting\n"
+            "• `/league call` — pick a flower + tier to rally all holders\n"
+            "• `/league preview` — privately check if a flower call is worth posting\n"
             "• `/league lock` — mark yourself done for the week\n"
-            "• `/league preview` — see who's locked in this week"
+            "  _(Regular members lock at 21 tasks · VIP members lock at 26)_"
         ),
         DWG_YELLOW,
     )
