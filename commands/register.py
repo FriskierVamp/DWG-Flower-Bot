@@ -81,15 +81,13 @@ class RegisterModal(discord.ui.Modal, title="Register for Dreamweaving Garden"):
         # 4 — Role swap: remove New, assign Member
         swap_status = ""
         try:
-            # Fetch fresh member from Discord so roles aren't stale/cached
-            fresh_member = await interaction.guild.fetch_member(int(discord_id))
             new_role    = interaction.guild.get_role(int(new_role_id))    if new_role_id    else None
             member_role = interaction.guild.get_role(int(member_role_id)) if member_role_id else None
 
-            if new_role and new_role in fresh_member.roles:
-                await fresh_member.remove_roles(new_role, reason="DWG registration")
+            if new_role and new_role in member.roles:
+                await member.remove_roles(new_role, reason="DWG registration")
             if member_role:
-                await fresh_member.add_roles(member_role, reason="DWG registration")
+                await member.add_roles(member_role, reason="DWG registration")
                 swap_status = f"\n✅ Role updated to <@&{member_role_id}>"
         except discord.Forbidden:
             swap_status = "\n⚠️ Bot lacks permission to manage roles — ask an admin to fix this."

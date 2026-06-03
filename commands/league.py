@@ -131,45 +131,49 @@ def register_league(tree: app_commands.CommandTree) -> None:
         SEP = "─" * 28
 
         if is_upgraded:
-            header = f"🌟 **{flower}**\n🚨 UPGRADED 🚨 · {pts} pts"
+            title_line    = f"🌟 **{flower}**"
+            upgraded_line = f"🚨 UPGRADED 🚨 · {pts} pts"
+            color         = discord.Color(0xFF4500)   # vivid orange-red for urgency
         else:
-            header = f"🌸 **{flower}**\nRegular · {pts} pts"
+            title_line    = f"🌸 **{flower}**"
+            upgraded_line = f"Regular · {pts} pts"
+            color         = DWG_YELLOW
 
+        # ── Build sections ──────────────────────────────────────────
         def mention_list(group):
             return ", ".join(f"<@{p['discord_id']}>" for p in group)
 
         def ign_list(group):
             return ", ".join(p["ign"] for p in group)
 
-        lines = [header, SEP, ""]
+        sections = []
 
         if best:
-            lines.append(f"🌸 **Best Flower**")
-            lines.append(mention_list(best))
+            sections.append(f"🌸 **Best Flower**\n{mention_list(best)}")
         else:
-            lines.append("🌸 **Best Flower**")
-            lines.append("_None_")
-
-        lines.append("")
+            sections.append("🌸 **Best Flower**\n_None_")
 
         if second_best:
-            lines.append("🌼 **Second Best**")
-            lines.append(mention_list(second_best))
+            sections.append(f"🌼 **Second Best**\n{mention_list(second_best)}")
         else:
-            lines.append("🌼 **Second Best**")
-            lines.append("_None_")
+            sections.append("🌼 **Second Best**\n_None_")
 
         if rest:
-            lines.append("")
-            lines.append("🌿 **Also Have It**")
-            lines.append(ign_list(rest))
+            sections.append(f"🌿 **Also Have It**\n{ign_list(rest)}")
 
-        lines.append("")
-        lines.append(SEP)
-        lines.append(f"-# {FOOTER}")
+        desc = (
+            f"{title_line}\n"
+            f"{upgraded_line}\n"
+            f"{SEP}\n\n"
+            + "\n\n".join(sections)
+            + f"\n\n{SEP}"
+        )
+
+        embed = discord.Embed(description=desc, color=color)
+        embed.set_footer(text=FOOTER)
 
         await interaction.response.send_message(
-            content="\n".join(lines),
+            embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
