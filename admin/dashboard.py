@@ -21,6 +21,8 @@ from db.queries import (
     get_all_flowers, upsert_flower, delete_flower, get_flower,
     get_all_vases,  upsert_master_vase as upsert_vase,   delete_vase,   get_vase,
     normalize_rarity, VALID_RARITIES, RARITY_ORDER,
+    get_all_players, get_player_flowers,
+    add_player_flower, remove_player_flower,
 )
 
 log          = logging.getLogger("dwg.admin")
@@ -467,6 +469,55 @@ def api_get_server_members(guild_id: str):
             "vase_count":    len(vases),
         })
     return jsonify(result)
+
+
+
+# ------------------------------------------------------------------
+# PLAYER FLOWER MANAGEMENT — for the dashboard catchup tool
+# ------------------------------------------------------------------
+
+@admin_app.route("/api/servers/<guild_id>/members/<discord_id>/flowers", methods=["GET"])
+@require_login
+def api_get_player_flowers(guild_id: str, discord_id: str):
+    """Return all master flowers with a flag indicating if this player owns each one."""
+    all_flowers = get_all_flowers()
+    owned       = set(get_player_flowers(guild_id, discord_id))
+    all_flowers.sort(key=lambda f: (
+        RARITY_ORDER.get(normalize_rarity(f["rarity"]), 99),
+        f["name"].lower()
+    ))
+    return jsonify([
+        {**dict(f), "owned": f["name"] in owned}
+        for f in all_flowers
+    ])
+
+
+@admin_app.route("/api/servers/<guild_id>/members/<discord_id>/flowers", methods=["PUT"])
+@require_login
+def api_save_player_flowers(guild_id: str, discord_id: str):
+    """
+    Replace a player's flower collection with the submitted set.
+    Body: { "owned": ["Flower A", "Flower B", ...] }
+    """
+    data     = request.get_json(silent=True) or {}
+    new_set  = set(data.get("owned", []))
+    current  = set(get_player_flowers(guild_id, discord_id))
+
+    to_add    = new_set - current
+    to_remove = current - new_set
+
+    added = removed = 0
+    for name in to_add:
+        ok = add_player_flower(guild_id, discord_id, name,
+                               source_type="admin", logged_by="dashboard")
+        if ok:
+            added += 1
+    for name in to_remove:
+        ok = remove_player_flower(guild_id, discord_id, name)
+        if ok:
+            removed += 1
+
+    return jsonify({"status": "ok", "added": added, "removed": removed})
 
 
 # ------------------------------------------------------------------
@@ -1250,6 +1301,7 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
                 <th>🌸 Flowers</th>
                 <th>🏺 Vases</th>
                 <th>Registered</th>
+                <th></th>
               </tr>
             </thead>
             <tbody id="memberRows"></tbody>
@@ -1257,6 +1309,54 @@ tbody td{padding:12px 16px;font-size:.87rem;vertical-align:middle}
         </div>
       </div>
     </main>
+  </div>
+</div>
+
+
+<!-- FLOWER MANAGER MODAL -->
+<div class="modal-overlay" id="flowerModal" style="align-items:flex-start;padding:24px;overflow-y:auto;">
+  <div class="modal" style="max-width:680px;width:95%;max-height:90vh;overflow-y:auto;padding:28px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0" id="flowerModalTitle">🌸 Manage Flowers</h3>
+      <button class="btn btn-secondary btn-sm" onclick="closeFlowerManager()">✕ Close</button>
+    </div>
+    <p style="font-size:.82rem;color:var(--text2);margin-bottom:14px;">
+      Tick the flowers this player owns. Hit <strong>Save</strong> when done — changes are applied immediately.
+    </p>
+
+    <!-- search + stats bar -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+      <div class="search-wrap" style="flex:1;min-width:180px;">
+        <span class="search-icon">🔍</span>
+        <input id="fmSearch" placeholder="Search flowers…" oninput="renderFlowerManager()" style="padding-left:36px;width:100%;background:var(--parchment);border:1.5px solid var(--border);border-radius:var(--r-sm);padding-top:9px;padding-bottom:9px;font-size:.85rem;outline:none;"/>
+      </div>
+      <span id="fmStats" style="font-size:.8rem;color:var(--text2);white-space:nowrap;"></span>
+    </div>
+
+    <!-- rarity filter tabs -->
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;" id="fmRarityTabs">
+      <button class="btn btn-sm" onclick="fmSetRarity('all',this)" style="background:var(--pink-soft);color:var(--pink-deep);border-color:var(--pink-mid);">All</button>
+      <button class="btn btn-sm btn-secondary" onclick="fmSetRarity('Shine',this)">✦ Shine</button>
+      <button class="btn btn-sm btn-secondary" onclick="fmSetRarity('Star',this)">★ Star</button>
+      <button class="btn btn-sm btn-secondary" onclick="fmSetRarity('Rare',this)">◆ Rare</button>
+      <button class="btn btn-sm btn-secondary" onclick="fmSetRarity('Fine',this)">◇ Fine</button>
+      <button class="btn btn-sm btn-secondary" onclick="fmSetRarity('Basic',this)">· Basic</button>
+    </div>
+
+    <!-- flower checklist -->
+    <div id="fmList" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:400px;overflow-y:auto;padding:4px 2px;margin-bottom:18px;"></div>
+
+    <!-- footer -->
+    <div style="display:flex;align-items:center;justify-content:space-between;border-top:1.5px solid var(--border);padding-top:14px;">
+      <div>
+        <button class="btn btn-secondary btn-sm" onclick="fmSelectAll()">Select All Visible</button>
+        <button class="btn btn-secondary btn-sm" style="margin-left:6px;" onclick="fmClearAll()">Clear All Visible</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="fmSaveStatus" style="font-size:.8rem;color:var(--text2);"></span>
+        <button class="btn btn-primary" onclick="saveFlowerManager()">💾 Save</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1444,7 +1544,7 @@ async function loadServerDetail(guildId, guildName){
     // Members table
     const tbody = document.getElementById('memberRows');
     if(!members.length){
-      tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">🌱</div><p>No members registered yet.</p></div></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon">🌱</div><p>No members registered yet.</p></div></td></tr>';
     } else {
       tbody.innerHTML = members.map(function(m){
         return '<tr>'
@@ -1454,6 +1554,7 @@ async function loadServerDetail(guildId, guildName){
           +'<td><span class="pts-base">'+m.flower_count+'</span></td>'
           +'<td><span class="pts-base">'+(m.vase_count||0)+'</span></td>'
           +'<td style="font-size:.82rem;color:var(--text2)">'+esc(m.registered_at)+'</td>'
+          +'<td><button class="btn btn-success btn-sm" onclick="openFlowerManager(\''+esc(m.discord_id)+'\',\''+esc(m.ign)+'\')" >🌸 Manage Flowers</button></td>'
           +'</tr>';
       }).join('');
     }
@@ -1816,6 +1917,173 @@ async function importFromPaste(){
   await load();
   toast(hasErrors?'Imported '+d.imported+' with '+d.errors.length+' issue(s).':'Imported '+d.imported+' flowers successfully!');
 }
+
+// ── FLOWER MANAGER ───────────────────────────────────────────────
+
+let fmGuildId    = null;
+let fmDiscordId  = null;
+let fmAllFlowers = [];   // [{name, rarity, base_points, owned}, ...]
+let fmOwned      = new Set();
+let fmRarity     = 'all';
+
+async function openFlowerManager(discordId, ign) {
+  fmGuildId   = currentServer ? currentServer.guild_id : null;
+  fmDiscordId = discordId;
+  if (!fmGuildId) { alert('No server selected.'); return; }
+
+  document.getElementById('flowerModalTitle').textContent = '🌸 ' + ign + ' — Flowers';
+  document.getElementById('fmSearch').value = '';
+  document.getElementById('fmSaveStatus').textContent = '';
+  document.getElementById('fmList').innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:24px;color:var(--text2)">Loading…</div>';
+  document.getElementById('fmStats').textContent = '';
+  fmRarity = 'all';
+  // reset rarity tab styles
+  document.querySelectorAll('#fmRarityTabs button').forEach((b,i) => {
+    b.style.background = i===0 ? 'var(--pink-soft)' : '';
+    b.style.color      = i===0 ? 'var(--pink-deep)' : '';
+    b.style.borderColor= i===0 ? 'var(--pink-mid)'  : '';
+  });
+
+  document.getElementById('flowerModal').classList.add('open');
+
+  try {
+    const r = await fetch('/api/servers/' + encodeURIComponent(fmGuildId)
+                        + '/members/' + encodeURIComponent(discordId) + '/flowers');
+    if (!r.ok) throw new Error('Failed to load flowers');
+    fmAllFlowers = await r.json();
+    fmOwned = new Set(fmAllFlowers.filter(f => f.owned).map(f => f.name));
+    renderFlowerManager();
+  } catch(e) {
+    document.getElementById('fmList').innerHTML =
+      '<div style="grid-column:1/-1;color:var(--pink-deep);padding:16px;">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+function closeFlowerManager() {
+  document.getElementById('flowerModal').classList.remove('open');
+  fmAllFlowers = []; fmOwned = new Set();
+}
+
+function fmSetRarity(r, btn) {
+  fmRarity = r;
+  document.querySelectorAll('#fmRarityTabs button').forEach(b => {
+    b.style.background  = '';
+    b.style.color       = '';
+    b.style.borderColor = '';
+    b.classList.remove('btn-primary');
+    b.classList.add('btn-secondary');
+  });
+  btn.style.background  = 'var(--pink-soft)';
+  btn.style.color       = 'var(--pink-deep)';
+  btn.style.borderColor = 'var(--pink-mid)';
+  renderFlowerManager();
+}
+
+function renderFlowerManager() {
+  const q = (document.getElementById('fmSearch').value || '').trim().toLowerCase();
+  const visible = fmAllFlowers.filter(f => {
+    const rarOk = fmRarity === 'all' || f.rarity === fmRarity;
+    const qOk   = !q || f.name.toLowerCase().includes(q);
+    return rarOk && qOk;
+  });
+
+  const ownedCount = fmAllFlowers.filter(f => fmOwned.has(f.name)).length;
+  document.getElementById('fmStats').textContent =
+    ownedCount + ' / ' + fmAllFlowers.length + ' owned  ·  showing ' + visible.length;
+
+  if (!visible.length) {
+    document.getElementById('fmList').innerHTML =
+      '<div style="grid-column:1/-1;text-align:center;padding:24px;color:var(--text2)">No flowers match.</div>';
+    return;
+  }
+
+  const rarityColors = {
+    Shine: '#fef9e7', Star: '#f5eeff', Rare: '#eaf4fd', Fine: '#edfaed', Basic: 'var(--parchment)'
+  };
+  const rarityText = {
+    Shine: '#b8860b', Star: '#8040c0', Rare: '#2878b0', Fine: '#287828', Basic: 'var(--text2)'
+  };
+
+  document.getElementById('fmList').innerHTML = visible.map(f => {
+    const checked = fmOwned.has(f.name) ? 'checked' : '';
+    const bg  = rarityColors[f.rarity] || 'var(--parchment)';
+    const col = rarityText[f.rarity]   || 'var(--text2)';
+    return '<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;'
+      + 'border-radius:8px;border:1.5px solid var(--border);background:' + bg + ';'
+      + 'cursor:pointer;transition:all .12s;user-select:none;" '
+      + 'onmouseover="this.style.borderColor='var(--pink)'" '
+      + 'onmouseout="this.style.borderColor='var(--border)'">'
+      + '<input type="checkbox" ' + checked + ' value="' + esc(f.name) + '" '
+      + 'onchange="fmToggle('' + esc(f.name) + '',this.checked)" '
+      + 'style="width:16px;height:16px;accent-color:var(--pink-deep);flex-shrink:0;"/>'
+      + '<span style="flex:1;font-size:.83rem;font-weight:500;color:var(--text)">' + esc(f.name) + '</span>'
+      + '<span style="font-size:.7rem;color:' + col + ';font-weight:600;">' + f.rarity + '</span>'
+      + '</label>';
+  }).join('');
+}
+
+function fmToggle(name, checked) {
+  if (checked) fmOwned.add(name);
+  else         fmOwned.delete(name);
+  // update stats line without re-rendering the whole list
+  const ownedCount = fmAllFlowers.filter(f => fmOwned.has(f.name)).length;
+  const q = (document.getElementById('fmSearch').value || '').trim().toLowerCase();
+  const visible = fmAllFlowers.filter(f => {
+    const rarOk = fmRarity === 'all' || f.rarity === fmRarity;
+    const qOk   = !q || f.name.toLowerCase().includes(q);
+    return rarOk && qOk;
+  });
+  document.getElementById('fmStats').textContent =
+    ownedCount + ' / ' + fmAllFlowers.length + ' owned  ·  showing ' + visible.length;
+}
+
+function fmSelectAll() {
+  const q = (document.getElementById('fmSearch').value || '').trim().toLowerCase();
+  fmAllFlowers.filter(f => {
+    const rarOk = fmRarity === 'all' || f.rarity === fmRarity;
+    const qOk   = !q || f.name.toLowerCase().includes(q);
+    return rarOk && qOk;
+  }).forEach(f => fmOwned.add(f.name));
+  renderFlowerManager();
+}
+
+function fmClearAll() {
+  const q = (document.getElementById('fmSearch').value || '').trim().toLowerCase();
+  fmAllFlowers.filter(f => {
+    const rarOk = fmRarity === 'all' || f.rarity === fmRarity;
+    const qOk   = !q || f.name.toLowerCase().includes(q);
+    return rarOk && qOk;
+  }).forEach(f => fmOwned.delete(f.name));
+  renderFlowerManager();
+}
+
+async function saveFlowerManager() {
+  document.getElementById('fmSaveStatus').textContent = 'Saving…';
+  try {
+    const r = await fetch(
+      '/api/servers/' + encodeURIComponent(fmGuildId)
+      + '/members/' + encodeURIComponent(fmDiscordId) + '/flowers',
+      {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ owned: Array.from(fmOwned) }),
+      }
+    );
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Save failed');
+    document.getElementById('fmSaveStatus').textContent =
+      '✓ Saved — +' + d.added + ' added, −' + d.removed + ' removed';
+    // refresh the member row count in the background
+    if (currentServer) loadServerDetail(currentServer.guild_id, currentServer.name);
+  } catch(e) {
+    document.getElementById('fmSaveStatus').textContent = '✗ ' + e.message;
+  }
+}
+
+document.getElementById('flowerModal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeFlowerManager();
+});
+
 
 load();
 </script>
