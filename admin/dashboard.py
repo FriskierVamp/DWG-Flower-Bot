@@ -1554,7 +1554,7 @@ async function loadServerDetail(guildId, guildName){
           +'<td><span class="pts-base">'+m.flower_count+'</span></td>'
           +'<td><span class="pts-base">'+(m.vase_count||0)+'</span></td>'
           +'<td style="font-size:.82rem;color:var(--text2)">'+esc(m.registered_at)+'</td>'
-          +'<td><button class="btn btn-success btn-sm" onclick="openFlowerManager(\''+esc(m.discord_id)+'\',\''+esc(m.ign)+'\')" >🌸 Manage Flowers</button></td>'
+          +'<td><button class="btn btn-success btn-sm fm-btn" data-id="'+esc(m.discord_id)+'" data-ign="'+esc(m.ign)+'">🌸 Manage Flowers</button></td>'
           +'</tr>';
       }).join('');
     }
@@ -1813,6 +1813,16 @@ async function confirmDelete(){
 
 document.getElementById('deleteModal').addEventListener('click',e=>{
   if(e.target===e.currentTarget) closeDelete();
+});
+
+// Event delegation for flower manager buttons (avoids inline onclick escaping)
+document.addEventListener('click', function(e) {
+  const btn = e.target.closest('.fm-btn');
+  if (btn) {
+    const id  = btn.getAttribute('data-id');
+    const ign = btn.getAttribute('data-ign');
+    if (id && ign) openFlowerManager(id, ign);
+  }
 });
 
 // ── BULK IMPORT ──
