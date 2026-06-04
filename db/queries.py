@@ -692,7 +692,8 @@ def get_league_call_holders(guild_id: str, flower_name: str, is_upgraded: bool) 
             (str(guild_id),),
         ).fetchall()
 
-    # 3. Find everyone who owns the chosen flower at the chosen upgrade status
+    # 3. Find everyone who owns the chosen flower (upgrade status is a call-time
+    #    declaration by the caller — we don't filter by the player's stored is_upgraded)
     holders = {
         r["discord_id"]: {"discord_id": r["discord_id"], "ign": r["ign"], "discord_name": r["discord_name"]}
         for r in all_rows

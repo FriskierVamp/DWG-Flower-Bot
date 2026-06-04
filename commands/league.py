@@ -131,49 +131,45 @@ def register_league(tree: app_commands.CommandTree) -> None:
         SEP = "─" * 28
 
         if is_upgraded:
-            title_line    = f"🌟 **{flower}**"
-            upgraded_line = f"🚨 UPGRADED 🚨 · {pts} pts"
-            color         = discord.Color(0xFF4500)   # vivid orange-red for urgency
+            header = f"🚨 UPGRADED 🚨 **{flower}** · {pts} pts"
+            color  = discord.Color(0xFF4500)
         else:
-            title_line    = f"🌸 **{flower}**"
-            upgraded_line = f"Regular · {pts} pts"
-            color         = DWG_YELLOW
+            header = f"🌸 **{flower}** · Regular · {pts} pts"
+            color  = DWG_YELLOW
 
-        # ── Build sections ──────────────────────────────────────────
+        # ── Build the plain-text content (mentions MUST be in content, not embed) ──
         def mention_list(group):
-            return ", ".join(f"<@{p['discord_id']}>" for p in group)
+            return " ".join(f"<@{p['discord_id']}>" for p in group)
 
         def ign_list(group):
             return ", ".join(p["ign"] for p in group)
 
-        sections = []
+        lines = [header, SEP]
 
         if best:
-            sections.append(f"🌸 **Best Flower**\n{mention_list(best)}")
+            lines.append(f"🌸 **Best Flower** — {mention_list(best)}")
         else:
-            sections.append("🌸 **Best Flower**\n_None_")
+            lines.append("🌸 **Best Flower** — _None_")
 
         if second_best:
-            sections.append(f"🌼 **Second Best**\n{mention_list(second_best)}")
+            lines.append(f"🌼 **Second Best** — {mention_list(second_best)}")
         else:
-            sections.append("🌼 **Second Best**\n_None_")
+            lines.append("🌼 **Second Best** — _None_")
 
         if rest:
-            sections.append(f"🌿 **Also Have It**\n{ign_list(rest)}")
+            lines.append(f"🌿 **Also Have It** — {ign_list(rest)}")
 
-        desc = (
-            f"{title_line}\n"
-            f"{upgraded_line}\n"
-            f"{SEP}\n\n"
-            + "\n\n".join(sections)
-            + f"\n\n{SEP}"
-        )
+        lines.append(SEP)
 
-        embed = discord.Embed(description=desc, color=color)
-        embed.set_footer(text=FOOTER)
+        # Mentions must live in `content`, not inside an embed, for Discord to ping
+        ping_ids = [p["discord_id"] for p in best + second_best]
+        ping_content = " ".join(f"<@{uid}>" for uid in ping_ids) if ping_ids else ""
 
+        message_body = "\n".join(lines)
+
+        # Send mentions in content (so Discord actually notifies) + the call body
         await interaction.response.send_message(
-            embed=embed,
+            content=f"{ping_content}\n{message_body}" if ping_content else message_body,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
@@ -192,23 +188,16 @@ def register_league(tree: app_commands.CommandTree) -> None:
     @league.command(name="preview", description="Privately preview whether a league flower call is worth posting")
     @app_commands.describe(
         flower="The flower you are considering calling",
-        upgraded="Is the flower upgraded? Upgraded = double points",
     )
     @app_commands.autocomplete(flower=preview_flower_autocomplete)
-    @app_commands.choices(upgraded=[
-        app_commands.Choice(name="Regular", value=0),
-        app_commands.Choice(name="Upgraded (×2 points)", value=1),
-    ])
     async def league_preview(
         interaction: discord.Interaction,
         flower: str,
-        upgraded: app_commands.Choice[int],
     ):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
-        is_upgraded = bool(upgraded.value)
-        guild_id    = str(interaction.guild_id)
+        guild_id = str(interaction.guild_id)
 
         matched = find_flower_match(flower)
         if not matched:
@@ -221,7 +210,8 @@ def register_league(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        data = get_league_call_holders(guild_id, matched, is_upgraded)
+        # Preview always uses regular points — upgraded is a call-time decision, not stored per-player
+        data = get_league_call_holders(guild_id, matched, is_upgraded=False)
         if not data:
             await interaction.response.send_message(
                 embed=discord.Embed(
@@ -235,8 +225,8 @@ def register_league(tree: app_commands.CommandTree) -> None:
         best        = data["best"]
         second_best = data["second_best"]
         rest        = data["rest"]
-        pts         = data["effective_pts"]
-        upgrade_label = "✨ Upgraded" if is_upgraded else "🌱 Regular"
+        base_pts    = data["base_points"]
+        upgraded_pts = base_pts * 2
 
         total_tagged = len(best) + len(second_best)
         total_have   = total_tagged + len(rest)
@@ -250,7 +240,8 @@ def register_league(tree: app_commands.CommandTree) -> None:
 
         SEP = "─" * 28
         lines = [
-            f"**{matched}** · {upgrade_label} · {pts} pts",
+            f"**{matched}**",
+            f"Regular: {base_pts} pts  |  Upgraded: {upgraded_pts} pts",
             SEP,
             f"🌸 **Best Flower:** {len(best)}",
             f"🌼 **Second Best:** {len(second_best)}",
@@ -277,7 +268,7 @@ def register_league(tree: app_commands.CommandTree) -> None:
         lines.append(SEP)
 
         embed = discord.Embed(
-            title=f"👁️ League Preview",
+            title="👁️ League Preview",
             description="\n".join(lines),
             color=DWG_PURPLE,
         )
