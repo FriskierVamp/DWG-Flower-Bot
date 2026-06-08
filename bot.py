@@ -30,11 +30,12 @@ FOOTER   = "Dreamweaving Garden • Grow together, bloom brighter"
 intents = discord.Intents.default()
 intents.members = True
 
-bot = discord.Client(intents=intents)
+bot  = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
 
 # ── Events ─────────────────────────────────────────────────────────
+
 @bot.event
 async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
@@ -46,6 +47,55 @@ async def on_ready():
             name="the garden bloom 🌸",
         )
     )
+    # Save guild names for all already-connected servers on startup
+    from db.schema import upsert_guild_config, is_approved
+    for guild in bot.guilds:
+        if not is_approved(str(guild.id)):
+            log.warning(
+                "Already in unauthorized guild %s (%s) — leaving.",
+                guild.name, guild.id,
+            )
+            await guild.leave()
+            continue
+        try:
+            upsert_guild_config(str(guild.id), guild_name=guild.name)
+            log.debug("Saved guild name for %s (%s)", guild.name, guild.id)
+        except Exception as e:
+            log.warning("Could not save guild name for %s: %s", guild.id, e)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Only allow approved guilds. Leave immediately if not authorized."""
+    from db.schema import upsert_guild_config, is_approved
+    if not is_approved(str(guild.id)):
+        log.warning(
+            "Unauthorized guild attempted install: %s (%s) — leaving.",
+            guild.name, guild.id,
+        )
+        await guild.leave()
+        return
+
+    # Approved — save guild name
+    try:
+        upsert_guild_config(str(guild.id), guild_name=guild.name)
+        log.info("Joined approved guild: %s (%s)", guild.name, guild.id)
+    except Exception as e:
+        log.warning("Could not save guild name on join for %s: %s", guild.id, e)
+
+
+@bot.event
+async def on_guild_update(before: discord.Guild, after: discord.Guild):
+    """Keep guild name up to date if the server is renamed."""
+    if before.name != after.name:
+        from db.schema import upsert_guild_config, is_approved
+        if not is_approved(str(after.id)):
+            return
+        try:
+            upsert_guild_config(str(after.id), guild_name=after.name)
+            log.info("Guild renamed: %s → %s (%s)", before.name, after.name, after.id)
+        except Exception as e:
+            log.warning("Could not update guild name for %s: %s", after.id, e)
 
 
 @bot.event

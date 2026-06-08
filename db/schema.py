@@ -17,8 +17,8 @@ DB_PATH = os.path.join(DB_DIR, "dreamweaving.db")
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row          # rows behave like dicts
-    conn.execute("PRAGMA journal_mode=WAL") # safe for concurrent reads
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -31,7 +31,7 @@ def init_db() -> None:
     # ------------------------------------------------------------------
     # GUILD CONFIG
     # Per-server settings written by /setup.
-    # No channel config — every command posts in the channel it was run in.
+    # approved = 1 means this guild is whitelisted to use the bot.
     # A guild is considered "set up" when leader_role_ids is non-empty.
     # ------------------------------------------------------------------
     cur.execute("""
@@ -41,6 +41,7 @@ def init_db() -> None:
         leader_role_ids TEXT NOT NULL DEFAULT '[]',
         new_role_id     TEXT,
         member_role_id  TEXT,
+        approved        INTEGER NOT NULL DEFAULT 0,
         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
     )
@@ -200,7 +201,6 @@ def init_db() -> None:
     # ------------------------------------------------------------------
     # MIGRATIONS — safe to run on existing databases
     # ------------------------------------------------------------------
-    # Add is_upgraded to player_flowers if it does not exist yet
     existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(player_flowers)")}
     if "is_upgraded" not in existing_cols:
         cur.execute("ALTER TABLE player_flowers ADD COLUMN is_upgraded INTEGER NOT NULL DEFAULT 0")
@@ -210,6 +210,11 @@ def init_db() -> None:
     if "is_vip" not in player_cols:
         cur.execute("ALTER TABLE players ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0")
         log.info("Migration: added is_vip column to players")
+
+    cfg_cols = {row[1] for row in cur.execute("PRAGMA table_info(guild_config)")}
+    if "approved" not in cfg_cols:
+        cur.execute("ALTER TABLE guild_config ADD COLUMN approved INTEGER NOT NULL DEFAULT 0")
+        log.info("Migration: added approved column to guild_config")
 
     conn.commit()
     conn.close()
@@ -233,6 +238,12 @@ def is_setup_complete(guild_id: str) -> bool:
     return bool(get_leader_role_ids(str(guild_id)))
 
 
+def is_approved(guild_id: str) -> bool:
+    """Returns True if this guild is whitelisted to use the bot."""
+    cfg = get_guild_config(str(guild_id))
+    return bool(cfg and cfg.get("approved"))
+
+
 def get_leader_role_ids(guild_id: str) -> list[int]:
     cfg = get_guild_config(str(guild_id))
     if not cfg:
@@ -247,7 +258,6 @@ def upsert_guild_config(guild_id: str, **kwargs) -> None:
     """Insert or update specific guild config fields."""
     cfg = get_guild_config(str(guild_id))
 
-    # Serialize list fields
     for key in ("leader_role_ids",):
         if key in kwargs and isinstance(kwargs[key], list):
             kwargs[key] = json.dumps(kwargs[key])
