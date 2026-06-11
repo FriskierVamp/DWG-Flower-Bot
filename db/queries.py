@@ -261,6 +261,36 @@ def get_player_missing_flowers(guild_id: str, discord_id: str) -> list[str]:
         return [r["name"] for r in rows]
 
 
+def get_player_flowers_with_points(guild_id: str, discord_id: str) -> list[dict]:
+    """Return player's flowers joined with base_points from master list.
+    Sorted by base_points DESC, then name ASC."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT pf.flower_name AS name, f.base_points
+               FROM player_flowers pf
+               JOIN flowers f ON f.name = pf.flower_name
+               WHERE pf.guild_id = ? AND pf.discord_id = ?
+               ORDER BY f.base_points DESC, pf.flower_name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_player_missing_flowers_with_points(guild_id: str, discord_id: str) -> list[dict]:
+    """Return missing flowers with base_points. Sorted by base_points DESC, then name ASC."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT f.name, f.base_points FROM flowers f
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM player_flowers pf
+                   WHERE pf.guild_id = ? AND pf.discord_id = ? AND pf.flower_name = f.name
+               )
+               ORDER BY f.base_points DESC, f.name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ------------------------------------------------------------------
 # MASTER VASE LIST (global — mirrors flower list for admin dashboard)
 # ------------------------------------------------------------------
@@ -417,6 +447,36 @@ def get_player_missing_vases(guild_id: str, discord_id: str) -> list[str]:
             (str(guild_id), str(discord_id)),
         ).fetchall()
         return [r["name"] for r in rows]
+
+
+def get_player_vases_with_points(guild_id: str, discord_id: str) -> list[dict]:
+    """Return player's vases joined with base_points from master list.
+    Sorted by base_points DESC, then name ASC."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT pv.vase_name AS name, mv.base_points
+               FROM player_vases pv
+               JOIN master_vases mv ON mv.name = pv.vase_name
+               WHERE pv.guild_id = ? AND pv.discord_id = ?
+               ORDER BY mv.base_points DESC, pv.vase_name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_player_missing_vases_with_points(guild_id: str, discord_id: str) -> list[dict]:
+    """Return missing vases with base_points. Sorted by base_points DESC, then name ASC."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT mv.name, mv.base_points FROM master_vases mv
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM player_vases pv
+                   WHERE pv.guild_id = ? AND pv.discord_id = ? AND pv.vase_name = mv.name
+               )
+               ORDER BY mv.base_points DESC, mv.name COLLATE NOCASE""",
+            (str(guild_id), str(discord_id)),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ------------------------------------------------------------------
