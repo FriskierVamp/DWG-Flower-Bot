@@ -992,6 +992,53 @@ class _SingleRoleView(discord.ui.View):
         )
 
 
+class _LockThresholdModal(discord.ui.Modal, title="Set Lock Thresholds"):
+    regular_input = discord.ui.TextInput(
+        label="Regular lock threshold (tasks)",
+        placeholder="e.g. 21",
+        min_length=1, max_length=4, required=True,
+    )
+    vip_input = discord.ui.TextInput(
+        label="VIP lock threshold (tasks)",
+        placeholder="e.g. 26",
+        min_length=1, max_length=4, required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            regular = int(self.regular_input.value.strip())
+            vip     = int(self.vip_input.value.strip())
+        except ValueError:
+            await interaction.response.send_message(
+                embed=_embed("❌ Invalid values", "Both thresholds must be whole numbers.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+        if regular <= 0 or vip <= 0:
+            await interaction.response.send_message(
+                embed=_embed("❌ Invalid values", "Thresholds must be greater than zero.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+        if vip < regular:
+            await interaction.response.send_message(
+                embed=_embed("❌ Invalid values", "VIP threshold must be greater than or equal to the regular threshold.", DWG_PINK),
+                ephemeral=True,
+            )
+            return
+        upsert_guild_config(str(interaction.guild_id),
+                            lock_threshold=regular,
+                            vip_lock_threshold=vip)
+        await interaction.response.send_message(
+            embed=_embed(
+                "🔒 Lock Thresholds Updated",
+                f"**Regular:** {regular} tasks\n**VIP:** {vip} tasks",
+                DWG_MINT,
+            ),
+            ephemeral=True,
+        )
+
+
 class ConfigPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=PANEL_TIMEOUT)
@@ -1019,6 +1066,10 @@ class ConfigPanel(discord.ui.View):
             view=_SingleRoleView("member_role_id", "Member Role"),
             ephemeral=True,
         )
+
+    @discord.ui.button(label="🔒 Lock thresholds", style=discord.ButtonStyle.secondary, row=1)
+    async def lock_thresholds_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_LockThresholdModal())
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1058,9 +1109,7 @@ def _guide_embeds() -> list[discord.Embed]:
         (
             "**Everyone** — see who has what.\n\n"
             "• `/lookup flower [name]` — who has this flower\n"
-            "• `/lookup vase [name]` — who has this vase\n"
-            "• `/lookup missing flowers` — flowers nobody has\n"
-            "• `/lookup missing vases` — vases nobody has"
+            "• `/lookup missing flowers` — flowers nobody has"
         ),
         DWG_BLUE,
     )
@@ -1072,7 +1121,7 @@ def _guide_embeds() -> list[discord.Embed]:
             "• `/league call` — pick a flower + tier to rally all holders\n"
             "• `/league preview` — privately check if a flower call is worth posting\n"
             "• `/league lock` — mark yourself done for the week\n"
-            "  _(Regular members lock at 21 tasks · VIP members lock at 26)_"
+            "  _(Lock threshold is set by your guild leaders via `/admin config`)_"
         ),
         DWG_YELLOW,
     )
@@ -1253,6 +1302,8 @@ def register_admin(tree: app_commands.CommandTree) -> None:
         leader_str = " ".join(f"<@&{r}>" for r in leader_ids) if leader_ids else "_not set_"
         new_str    = f"<@&{cfg['new_role_id']}>"    if cfg.get("new_role_id")    else "_not set_"
         mem_str    = f"<@&{cfg['member_role_id']}>" if cfg.get("member_role_id") else "_not set_"
+        lock_reg   = cfg.get("lock_threshold")    or 21
+        lock_vip   = cfg.get("vip_lock_threshold") or 26
 
         await interaction.response.send_message(
             embed=_embed(
@@ -1261,7 +1312,8 @@ def register_admin(tree: app_commands.CommandTree) -> None:
                     "**Current settings:**\n"
                     f"👑 Leader roles: {leader_str}\n"
                     f"🌱 New role: {new_str}\n"
-                    f"🌷 Member role: {mem_str}\n\n"
+                    f"🌷 Member role: {mem_str}\n"
+                    f"🔒 Lock threshold: **{lock_reg}** tasks (regular) · **{lock_vip}** tasks (VIP)\n\n"
                     "Pick what you'd like to update:"
                 ),
                 DWG_PURPLE,

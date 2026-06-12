@@ -4,9 +4,9 @@ Dreamweaving Garden Bot — /league command group (everyone)
 Member-facing league interactions.
 
 Subcommands:
-  /league lock              — mark yourself done for the week
-  /league call              — announce that the league is starting (anyone can call)
-  /league preview           — see the current week's locked players
+  /league lock    — mark yourself done for the week
+  /league call    — announce a flower call to rally holders
+  /league preview — privately preview whether a call is worth posting
 """
 
 import datetime
@@ -15,9 +15,9 @@ from discord import app_commands
 from db.queries import (
     set_league_lock, get_guild_league_state, get_league_state,
     get_flower_names_for_autocomplete, get_league_call_holders,
-    get_player_vip, get_league_call_holders,
-    find_flower_match,
+    get_player_vip, find_flower_match,
 )
+from db.schema import get_guild_config
 from utils.guards import reject_if_not_setup, reject_if_not_registered
 
 DWG_PURPLE = discord.Color(0xF0A8C0)
@@ -28,10 +28,26 @@ FOOTER     = "Dreamweaving Garden • Grow together, bloom brighter"
 
 
 def _current_week_start() -> str:
-    """ISO date of the most recent Monday (UTC)."""
-    today = datetime.datetime.utcnow().date()
+    today  = datetime.datetime.utcnow().date()
     monday = today - datetime.timedelta(days=today.weekday())
     return monday.isoformat()
+
+
+def _lock_thresholds(guild_id: str) -> tuple[int, int]:
+    """Return (regular_threshold, vip_threshold) for this guild.
+    Falls back to (21, 26) if not configured."""
+    cfg = get_guild_config(guild_id)
+    if not cfg:
+        return 21, 26
+    try:
+        regular = int(cfg.get("lock_threshold") or 21)
+    except (TypeError, ValueError):
+        regular = 21
+    try:
+        vip = int(cfg.get("vip_lock_threshold") or 26)
+    except (TypeError, ValueError):
+        vip = 26
+    return regular, vip
 
 
 def register_league(tree: app_commands.CommandTree) -> None:
@@ -59,8 +75,9 @@ def register_league(tree: app_commands.CommandTree) -> None:
             )
             return
 
+        regular_threshold, vip_threshold = _lock_thresholds(guild_id)
         is_vip     = get_player_vip(guild_id, discord_id)
-        lock_tier  = 26 if is_vip else 21
+        lock_tier  = vip_threshold if is_vip else regular_threshold
         vip_note   = " _(VIP)_" if is_vip else ""
 
         set_league_lock(guild_id, discord_id, week, locked=True)
@@ -79,17 +96,15 @@ def register_league(tree: app_commands.CommandTree) -> None:
 
     # ── /league call ───────────────────────────────────────────────
     async def flower_autocomplete(
-        interaction: discord.Interaction,
-        current: str,
+        interaction: discord.Interaction, current: str,
     ) -> list[app_commands.Choice[str]]:
         names = get_flower_names_for_autocomplete()
         return [
             app_commands.Choice(name=n, value=n)
-            for n in names
-            if current.lower() in n.lower()
+            for n in names if current.lower() in n.lower()
         ][:25]
 
-    @league.command(name="call", description="Call the league — pick a flower and its tier to rally holders")
+    @league.command(name="call", description="Call the league — pick a flower and tier to rally holders")
     @app_commands.describe(
         flower="The flower being called for this league run",
         upgraded="Is the flower upgraded? Upgraded = double points",
@@ -111,7 +126,6 @@ def register_league(tree: app_commands.CommandTree) -> None:
         guild_id    = str(interaction.guild_id)
 
         data = get_league_call_holders(guild_id, flower, is_upgraded)
-
         if not data:
             await interaction.response.send_message(
                 embed=discord.Embed(
@@ -123,7 +137,6 @@ def register_league(tree: app_commands.CommandTree) -> None:
             return
 
         pts         = data["effective_pts"]
-        base_pts    = data["base_points"]
         best        = data["best"]
         second_best = data["second_best"]
         rest        = data["rest"]
@@ -137,13 +150,13 @@ def register_league(tree: app_commands.CommandTree) -> None:
             header = f"🌸 **{flower}** · Regular · {pts} pts"
             color  = DWG_YELLOW
 
-        # ── Build the plain-text content (mentions MUST be in content, not embed) ──
         def mention_list(group):
             return " ".join(f"<@{p['discord_id']}>" for p in group)
 
         def ign_list(group):
             return ", ".join(p["ign"] for p in group)
 
+        # Build message body — pings live inline on Best/Second Best lines
         lines = [header, SEP]
 
         if best:
@@ -161,45 +174,40 @@ def register_league(tree: app_commands.CommandTree) -> None:
 
         lines.append(SEP)
 
-        # Mentions must live in `content`, not inside an embed, for Discord to ping
-        ping_ids = [p["discord_id"] for p in best + second_best]
-        ping_content = " ".join(f"<@{uid}>" for uid in ping_ids) if ping_ids else ""
+        # content must carry the mentions so Discord sends notifications
+        # No standalone ping line — mentions are embedded in the body lines above
+        all_ping_ids = [p["discord_id"] for p in best + second_best]
+        hidden_pings = " ".join(f"<@{uid}>" for uid in all_ping_ids) if all_ping_ids else ""
 
+        # Discord requires mention IDs appear in `content` to actually notify.
+        # We put them invisibly at the start (zero-width space trick not needed —
+        # Discord counts any mention in content, even if it also appears in the body).
         message_body = "\n".join(lines)
 
-        # Send mentions in content (so Discord actually notifies) + the call body
         await interaction.response.send_message(
-            content=f"{ping_content}\n{message_body}" if ping_content else message_body,
+            content=f"{hidden_pings}\n{message_body}" if hidden_pings else message_body,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
 
     # ── /league preview ────────────────────────────────────────────
     async def preview_flower_autocomplete(
-        interaction: discord.Interaction,
-        current: str,
+        interaction: discord.Interaction, current: str,
     ) -> list[app_commands.Choice[str]]:
         names = get_flower_names_for_autocomplete()
         return [
             app_commands.Choice(name=n, value=n)
-            for n in names
-            if current.lower() in n.lower()
+            for n in names if current.lower() in n.lower()
         ][:25]
 
     @league.command(name="preview", description="Privately preview whether a league flower call is worth posting")
-    @app_commands.describe(
-        flower="The flower you are considering calling",
-    )
+    @app_commands.describe(flower="The flower you are considering calling")
     @app_commands.autocomplete(flower=preview_flower_autocomplete)
-    async def league_preview(
-        interaction: discord.Interaction,
-        flower: str,
-    ):
+    async def league_preview(interaction: discord.Interaction, flower: str):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
 
         guild_id = str(interaction.guild_id)
-
-        matched = find_flower_match(flower)
+        matched  = find_flower_match(flower)
         if not matched:
             await interaction.response.send_message(
                 embed=discord.Embed(
@@ -210,7 +218,6 @@ def register_league(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        # Preview always uses regular points — upgraded is a call-time decision, not stored per-player
         data = get_league_call_holders(guild_id, matched, is_upgraded=False)
         if not data:
             await interaction.response.send_message(
@@ -222,21 +229,19 @@ def register_league(tree: app_commands.CommandTree) -> None:
             )
             return
 
-        best        = data["best"]
-        second_best = data["second_best"]
-        rest        = data["rest"]
-        base_pts    = data["base_points"]
+        best         = data["best"]
+        second_best  = data["second_best"]
+        rest         = data["rest"]
+        base_pts     = data["base_points"]
         upgraded_pts = base_pts * 2
-
-        total_tagged = len(best) + len(second_best)
-        total_have   = total_tagged + len(rest)
+        total_have   = len(best) + len(second_best) + len(rest)
 
         if total_have == 0:
             recommendation = "Probably not — no one in this guild has this flower."
-        elif total_tagged > 0:
+        elif len(best) + len(second_best) > 0:
             recommendation = "Yes — at least one player would be pinged."
         else:
-            recommendation = "Maybe — players have it but it is not their top 2 flower."
+            recommendation = "Maybe — players have it but it's not their top 2 flower."
 
         SEP = "─" * 28
         lines = [
@@ -251,19 +256,11 @@ def register_league(tree: app_commands.CommandTree) -> None:
         ]
 
         if best:
-            lines.append("")
-            lines.append("🌸 **Best Flower:**")
-            lines.append(", ".join(p["ign"] for p in best))
-
+            lines += ["", "🌸 **Best Flower:**", ", ".join(p["ign"] for p in best)]
         if second_best:
-            lines.append("")
-            lines.append("🌼 **Second Best:**")
-            lines.append(", ".join(p["ign"] for p in second_best))
-
+            lines += ["", "🌼 **Second Best:**", ", ".join(p["ign"] for p in second_best)]
         if rest:
-            lines.append("")
-            lines.append("🌿 **Also Have It:**")
-            lines.append(", ".join(p["ign"] for p in rest))
+            lines += ["", "🌿 **Also Have It:**", ", ".join(p["ign"] for p in rest)]
 
         lines.append(SEP)
 

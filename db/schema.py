@@ -36,12 +36,14 @@ def init_db() -> None:
     # ------------------------------------------------------------------
     cur.execute("""
     CREATE TABLE IF NOT EXISTS guild_config (
-        guild_id        TEXT PRIMARY KEY,
-        guild_name      TEXT,
-        leader_role_ids TEXT NOT NULL DEFAULT '[]',
-        new_role_id     TEXT,
-        member_role_id  TEXT,
-        approved        INTEGER NOT NULL DEFAULT 0,
+        guild_id          TEXT PRIMARY KEY,
+        guild_name        TEXT,
+        leader_role_ids   TEXT NOT NULL DEFAULT '[]',
+        new_role_id       TEXT,
+        member_role_id    TEXT,
+        approved          INTEGER NOT NULL DEFAULT 0,
+        lock_threshold    INTEGER NOT NULL DEFAULT 21,
+        vip_lock_threshold INTEGER NOT NULL DEFAULT 26,
         created_at      TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
     )
@@ -215,6 +217,12 @@ def init_db() -> None:
     if "approved" not in cfg_cols:
         cur.execute("ALTER TABLE guild_config ADD COLUMN approved INTEGER NOT NULL DEFAULT 0")
         log.info("Migration: added approved column to guild_config")
+    if "lock_threshold" not in cfg_cols:
+        cur.execute("ALTER TABLE guild_config ADD COLUMN lock_threshold INTEGER NOT NULL DEFAULT 21")
+        log.info("Migration: added lock_threshold column to guild_config")
+    if "vip_lock_threshold" not in cfg_cols:
+        cur.execute("ALTER TABLE guild_config ADD COLUMN vip_lock_threshold INTEGER NOT NULL DEFAULT 26")
+        log.info("Migration: added vip_lock_threshold column to guild_config")
 
     conn.commit()
     conn.close()
