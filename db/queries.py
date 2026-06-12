@@ -262,11 +262,10 @@ def get_player_missing_flowers(guild_id: str, discord_id: str) -> list[str]:
 
 
 def get_player_flowers_with_points(guild_id: str, discord_id: str) -> list[dict]:
-    """Return player's flowers joined with base_points from master list.
-    Sorted by base_points DESC, then name ASC."""
+    """Return player's flowers with rarity and base_points. Used for /my flowers display."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT pf.flower_name AS name, f.base_points
+            """SELECT pf.flower_name AS name, f.rarity, f.base_points
                FROM player_flowers pf
                JOIN flowers f ON f.name = pf.flower_name
                WHERE pf.guild_id = ? AND pf.discord_id = ?
@@ -277,10 +276,10 @@ def get_player_flowers_with_points(guild_id: str, discord_id: str) -> list[dict]
 
 
 def get_player_missing_flowers_with_points(guild_id: str, discord_id: str) -> list[dict]:
-    """Return missing flowers with base_points. Sorted by base_points DESC, then name ASC."""
+    """Return missing flowers with rarity and base_points. Used for /my missing flowers display."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT f.name, f.base_points FROM flowers f
+            """SELECT f.name, f.rarity, f.base_points FROM flowers f
                WHERE NOT EXISTS (
                    SELECT 1 FROM player_flowers pf
                    WHERE pf.guild_id = ? AND pf.discord_id = ? AND pf.flower_name = f.name
@@ -450,11 +449,10 @@ def get_player_missing_vases(guild_id: str, discord_id: str) -> list[str]:
 
 
 def get_player_vases_with_points(guild_id: str, discord_id: str) -> list[dict]:
-    """Return player's vases joined with base_points from master list.
-    Sorted by base_points DESC, then name ASC."""
+    """Return player's vases with rarity and base_points. Used for /my vases display."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT pv.vase_name AS name, mv.base_points
+            """SELECT pv.vase_name AS name, mv.rarity, mv.base_points
                FROM player_vases pv
                JOIN master_vases mv ON mv.name = pv.vase_name
                WHERE pv.guild_id = ? AND pv.discord_id = ?
@@ -465,10 +463,10 @@ def get_player_vases_with_points(guild_id: str, discord_id: str) -> list[dict]:
 
 
 def get_player_missing_vases_with_points(guild_id: str, discord_id: str) -> list[dict]:
-    """Return missing vases with base_points. Sorted by base_points DESC, then name ASC."""
+    """Return missing vases with rarity and base_points. Used for /my missing vases display."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT mv.name, mv.base_points FROM master_vases mv
+            """SELECT mv.name, mv.rarity, mv.base_points FROM master_vases mv
                WHERE NOT EXISTS (
                    SELECT 1 FROM player_vases pv
                    WHERE pv.guild_id = ? AND pv.discord_id = ? AND pv.vase_name = mv.name

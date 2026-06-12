@@ -4,14 +4,14 @@ Dreamweaving Garden Bot — /my command group (everyone)
 Personal collection management: flowers, vases, missing items.
 
 Subcommands:
-  /my flowers              — show your flower collection grouped by base points (highest first)
-  /my vases                — show your vase collection grouped by base points (highest first)
-  /my add flower [name]    — add a flower to your collection
-  /my add vase [name]      — add a vase to your collection
-  /my remove flower [name] — remove a flower from your collection
-  /my remove vase [name]   — remove a vase from your collection
-  /my missing flowers      — flowers from the master list you don't have, grouped by base points
-  /my missing vases        — vases from the master list you don't have, grouped by base points
+  /my flowers              — collection grouped by rarity, then points desc within each tier
+  /my vases                — same for vases
+  /my add flower [name]    — add a flower (autocomplete, no modal)
+  /my add vase [name]      — add a vase (autocomplete, no modal)
+  /my remove flower [name] — remove a flower (autocomplete, no modal)
+  /my remove vase [name]   — remove a vase (autocomplete, no modal)
+  /my missing flowers      — missing flowers grouped by rarity, then points desc
+  /my missing vases        — missing vases grouped by rarity, then points desc
 """
 
 import discord
@@ -32,6 +32,9 @@ DWG_PINK   = discord.Color(0xF7CCD8)
 DWG_BLUE   = discord.Color(0xB8D8F0)
 FOOTER     = "Dreamweaving Garden • Grow together, bloom brighter"
 
+RARITY_ORDER = ["Shine", "Star", "Rare", "Fine", "Basic"]
+RARITY_EMOJI = {"Shine": "✦", "Star": "★", "Rare": "◆", "Fine": "◇", "Basic": "·"}
+
 
 # ------------------------------------------------------------------
 # AUTOCOMPLETE HELPERS
@@ -42,8 +45,7 @@ async def flower_name_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     names = get_flower_names_for_autocomplete()
     q = (current or "").lower()
-    matches = [n for n in names if q in n.lower()][:25]
-    return [app_commands.Choice(name=n, value=n) for n in matches]
+    return [app_commands.Choice(name=n, value=n) for n in names if q in n.lower()][:25]
 
 
 async def vase_name_autocomplete(
@@ -51,92 +53,87 @@ async def vase_name_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     names = get_vase_names_for_autocomplete()
     q = (current or "").lower()
-    matches = [n for n in names if q in n.lower()][:25]
-    return [app_commands.Choice(name=n, value=n) for n in matches]
+    return [app_commands.Choice(name=n, value=n) for n in names if q in n.lower()][:25]
 
 
 # ------------------------------------------------------------------
-# DISPLAY HELPER — grouped by base points, highest first
+# DISPLAY HELPER — rarity groups, points desc within each group
 # ------------------------------------------------------------------
 
 def _grouped_embed(
     title: str,
-    items: list[dict],   # each dict has "name" and "base_points"
+    items: list[dict],   # each dict: {name, rarity, base_points}
     color: discord.Color,
     empty_msg: str = "Nothing here yet.",
-    show_upgraded: bool = True,
 ) -> list[discord.Embed]:
     """
-    Build one or more embeds displaying items grouped by base_points,
-    highest group first.
+    Groups items by rarity tier (Shine → Star → Rare → Fine → Basic).
+    Within each tier, sorted by base_points descending then name alphabetically.
+    Each item line shows: name · X pts · X×2 upgraded
 
-    Each group header shows the point value (and ×2 upgraded if applicable).
-    Items within each group are listed alphabetically.
-
-    Returns a list of embeds (may be >1 if the collection is very large).
+    Returns a list of embeds (paginated at ~3900 chars each).
     """
     if not items:
         e = discord.Embed(title=title, description=empty_msg, color=color)
         e.set_footer(text=FOOTER)
         return [e]
 
-    # Group by base_points
     from collections import defaultdict
-    groups: dict[int, list[str]] = defaultdict(list)
+    by_rarity: dict[str, list[dict]] = defaultdict(list)
     for item in items:
-        groups[item["base_points"]].append(item["name"])
+        by_rarity[item.get("rarity", "Basic")].append(item)
 
-    # Build lines, highest points first
     lines = []
-    for pts in sorted(groups.keys(), reverse=True):
-        names = groups[pts]
-        if show_upgraded:
-            header = f"**{pts} pts  ·  {pts * 2} upgraded** — {len(names)} flower{'s' if len(names) != 1 else ''}"
-        else:
-            header = f"**{pts} pts** — {len(names)} flower{'s' if len(names) != 1 else ''}"
-        lines.append(header)
-        for name in sorted(names):
-            lines.append(f"  • {name}")
-        lines.append("")  # blank line between groups
+    for rarity in RARITY_ORDER:
+        if rarity not in by_rarity:
+            continue
+        group = sorted(
+            by_rarity[rarity],
+            key=lambda f: (-f["base_points"], f["name"].lower())
+        )
+        emoji = RARITY_EMOJI.get(rarity, "·")
+        lines.append(f"**{emoji} {rarity}** — {len(group)}")
+        for f in group:
+            pts = f["base_points"]
+            lines.append(f"  • {f['name']}  ·  {pts} pts  ·  {pts * 2} upgraded")
+        lines.append("")
 
-    # Chunk into embeds (Discord embed description cap = 4096 chars)
-    embeds = []
-    current_lines = []
-    current_len   = 0
-    first         = True
+    # Paginate
+    embeds    = []
+    cur_lines = []
+    cur_len   = 0
+    first     = True
 
     for line in lines:
         line_len = len(line) + 1
-        if current_len + line_len > 3900 and current_lines:
+        if cur_len + line_len > 3900 and cur_lines:
             e = discord.Embed(
                 title=title if first else f"{title} (continued)",
-                description="\n".join(current_lines).rstrip(),
+                description="\n".join(cur_lines).rstrip(),
                 color=color,
             )
             e.set_footer(text=FOOTER)
             embeds.append(e)
-            current_lines = []
-            current_len   = 0
-            first         = False
-        current_lines.append(line)
-        current_len += line_len
+            cur_lines = []
+            cur_len   = 0
+            first     = False
+        cur_lines.append(line)
+        cur_len += line_len
 
-    if current_lines:
+    if cur_lines:
         e = discord.Embed(
             title=title if first else f"{title} (continued)",
-            description="\n".join(current_lines).rstrip(),
+            description="\n".join(cur_lines).rstrip(),
             color=color,
         )
         e.set_footer(text=FOOTER)
         embeds.append(e)
 
-    # Add total count to first embed footer
-    total = len(items)
-    group_count = len(groups)
+    total         = len(items)
+    rarity_groups = len(by_rarity)
     embeds[0].set_footer(
-        text=f"{total} total  ·  {group_count} point group{'s' if group_count != 1 else ''}  ·  {FOOTER}"
+        text=f"{total} total  ·  {rarity_groups} rarit{'ies' if rarity_groups != 1 else 'y'}  ·  {FOOTER}"
     )
-
     return embeds
 
 
@@ -152,7 +149,7 @@ def register_my(tree: app_commands.CommandTree) -> None:
     missing_grp  = app_commands.Group(name="missing", description="What you're missing",          parent=my_group)
 
     # ── /my flowers ────────────────────────────────────────────────
-    @my_group.command(name="flowers", description="Show your flower collection grouped by points")
+    @my_group.command(name="flowers", description="Show your flower collection grouped by rarity and points")
     async def my_flowers(interaction: discord.Interaction):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
@@ -164,12 +161,11 @@ def register_my(tree: app_commands.CommandTree) -> None:
             f"🌸 {interaction.user.display_name}'s Flowers",
             items, DWG_PINK,
             empty_msg="You haven't tracked any flowers yet. Use `/my add flower` to get started.",
-            show_upgraded=True,
         )
         await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
 
     # ── /my vases ──────────────────────────────────────────────────
-    @my_group.command(name="vases", description="Show your vase collection grouped by points")
+    @my_group.command(name="vases", description="Show your vase collection grouped by rarity and points")
     async def my_vases(interaction: discord.Interaction):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
@@ -181,7 +177,6 @@ def register_my(tree: app_commands.CommandTree) -> None:
             f"🏺 {interaction.user.display_name}'s Vases",
             items, DWG_BLUE,
             empty_msg="You haven't tracked any vases yet. Use `/my add vase` to get started.",
-            show_upgraded=True,
         )
         await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
 
@@ -340,7 +335,7 @@ def register_my(tree: app_commands.CommandTree) -> None:
         )
 
     # ── /my missing flowers ────────────────────────────────────────
-    @missing_grp.command(name="flowers", description="Flowers from the master list you don't have yet")
+    @missing_grp.command(name="flowers", description="Flowers you're missing, grouped by rarity and points")
     async def my_missing_flowers(interaction: discord.Interaction):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
@@ -352,12 +347,11 @@ def register_my(tree: app_commands.CommandTree) -> None:
             f"🌱 Flowers {interaction.user.display_name} is missing",
             items, DWG_PURPLE,
             empty_msg="You have every flower in the master list! 🌟",
-            show_upgraded=True,
         )
         await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
 
     # ── /my missing vases ──────────────────────────────────────────
-    @missing_grp.command(name="vases", description="Vases from the master list you don't have yet")
+    @missing_grp.command(name="vases", description="Vases you're missing, grouped by rarity and points")
     async def my_missing_vases(interaction: discord.Interaction):
         if await reject_if_not_setup(interaction): return
         if await reject_if_not_registered(interaction): return
@@ -369,7 +363,6 @@ def register_my(tree: app_commands.CommandTree) -> None:
             f"🌱 Vases {interaction.user.display_name} is missing",
             items, DWG_PURPLE,
             empty_msg="You have every vase in the master list! 🌟",
-            show_upgraded=True,
         )
         await interaction.response.send_message(embeds=embeds[:10], ephemeral=True)
 
