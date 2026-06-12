@@ -98,24 +98,6 @@ async def on_guild_update(before: discord.Guild, after: discord.Guild):
             log.warning("Could not update guild name for %s: %s", after.id, e)
 
 
-@bot.event
-async def on_member_join(member: discord.Member):
-    """Auto-assign the 'New' role when someone joins."""
-    from db.schema import get_guild_config
-    cfg = get_guild_config(str(member.guild.id))
-    if not cfg or not cfg.get("new_role_id"):
-        return
-    try:
-        role = member.guild.get_role(int(cfg["new_role_id"]))
-    except (ValueError, TypeError):
-        return
-    if role:
-        try:
-            await member.add_roles(role, reason="Auto-assigned New role on join")
-            log.info("Assigned New role to %s in %s", member, member.guild)
-        except discord.Forbidden:
-            log.warning("Missing permission to assign New role in %s", member.guild)
-
 
 @bot.event
 async def on_app_command_error(
