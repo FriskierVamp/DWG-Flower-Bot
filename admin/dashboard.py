@@ -18,8 +18,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db.queries import (
-    get_all_flowers, upsert_flower, delete_flower, get_flower,
-    get_all_vases,  upsert_master_vase as upsert_vase,   delete_vase,   get_vase,
+    get_all_flowers, upsert_flower, delete_flower, get_flower, rename_flower,
+    get_all_vases,  upsert_master_vase as upsert_vase,   delete_vase,   get_vase,  rename_vase,
     normalize_rarity, VALID_RARITIES, RARITY_ORDER,
     get_all_players, get_player_flowers,
     add_player_flower, remove_player_flower,
@@ -109,6 +109,23 @@ def api_update_flower(name: str):
 
     upsert_flower(name, rarity, base_points, upgrade_cost, source)
     return jsonify({"status": "ok", "name": name})
+
+
+@admin_app.route("/api/flowers/<path:name>/rename", methods=["POST"])
+@require_login
+def api_rename_flower(name: str):
+    """Rename a flower in the master list.
+    Body: { "new_name": "..." }
+    The ON UPDATE CASCADE FK means all player_flowers rows update automatically.
+    """
+    data = request.get_json(silent=True) or {}
+    new_name = str(data.get("new_name", "")).strip()
+    if not new_name:
+        return jsonify({"error": "new_name is required."}), 400
+    result = rename_flower(name, new_name)
+    if not result["ok"]:
+        return jsonify({"error": result["error"]}), 409
+    return jsonify({"status": "ok", "old_name": name, "new_name": new_name, "players_updated": result["updated"]})
 
 
 @admin_app.route("/api/flowers/<path:name>", methods=["DELETE"])
@@ -234,6 +251,23 @@ def api_update_vase(name: str):
 
     upsert_vase(name, rarity, base_points, upgrade_cost, source)
     return jsonify({"status": "ok", "name": name})
+
+
+@admin_app.route("/api/vases/<path:name>/rename", methods=["POST"])
+@require_login
+def api_rename_vase(name: str):
+    """Rename a vase in the master list.
+    Body: { "new_name": "..." }
+    The ON UPDATE CASCADE FK means all player_vases rows update automatically.
+    """
+    data = request.get_json(silent=True) or {}
+    new_name = str(data.get("new_name", "")).strip()
+    if not new_name:
+        return jsonify({"error": "new_name is required."}), 400
+    result = rename_vase(name, new_name)
+    if not result["ok"]:
+        return jsonify({"error": result["error"]}), 409
+    return jsonify({"status": "ok", "old_name": name, "new_name": new_name, "players_updated": result["updated"]})
 
 
 @admin_app.route("/api/vases/<path:name>", methods=["DELETE"])
@@ -1387,7 +1421,7 @@ function render(){
       +'</tr>'
       +'<tr class="edit-row" id="edit-'+i+'" data-item-name="'+esc(f.name)+'">'
         +'<td colspan="7"><div class="edit-form">'
-          +'<div class="field"><label>Name (locked)</label><input value="'+esc(f.name)+'" disabled style="opacity:.55"/></div>'
+          +'<div class="field"><label>Name</label><input id="er-'+i+'-name" value="'+esc(f.name)+'" maxlength="100"/></div>'
           +'<div class="field"><label>Rarity</label><select id="er-'+i+'-rarity">'+opts+'</select></div>'
           +'<div class="field"><label>Base Points</label><input id="er-'+i+'-pts" type="number" min="0" value="'+f.base_points+'" oninput="updateEditCalc(\''+i+'\')"/></div>'
           +'<div class="field"><label>Upgrade Cost 💎</label><input id="er-'+i+'-cost" type="number" min="0" value="'+f.upgrade_cost+'"/></div>'
@@ -1431,16 +1465,34 @@ function closeEdit(id){const row=document.getElementById('edit-'+id);if(row)row.
 
 async function saveEdit(id){
   const row=document.getElementById('edit-'+id);
-  const name=row?row.getAttribute('data-item-name'):'';
-  if(!name){toast('Could not find item name.','err');return;}
+  const oldName=row?row.getAttribute('data-item-name'):'';
+  if(!oldName){toast('Could not find item name.','err');return;}
+  const newNameEl=document.getElementById('er-'+id+'-name');
+  const newName=newNameEl?newNameEl.value.trim():oldName;
+  if(!newName){toast(cfg().label+' name cannot be blank.','err');return;}
   const rarity=document.getElementById('er-'+id+'-rarity').value;
   const pts=parseInt(document.getElementById('er-'+id+'-pts').value)||0;
   const cost=parseInt(document.getElementById('er-'+id+'-cost').value)||0;
   const source=document.getElementById('er-'+id+'-source').value.trim()||'Unknown';
-  const r=await fetch(API(cfg().api+'/'+encodeURIComponent(name)),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})});
+
+  // Step 1: rename if the name changed
+  const nameChanged=newName.toLowerCase()!==oldName.toLowerCase();
+  let effectiveName=oldName;
+  if(nameChanged){
+    const rr=await fetch(API(cfg().api+'/'+encodeURIComponent(oldName)+'/rename'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({new_name:newName})});
+    const rd=await rr.json();
+    if(!rr.ok){toast(rd.error||'Rename failed.','err');return;}
+    effectiveName=newName;
+    const playersUpdated=rd.players_updated||0;
+    if(playersUpdated>0) toast('✓ Renamed to "'+newName+'" — '+playersUpdated+' player record'+(playersUpdated!==1?'s':'')+' updated.');
+  }
+
+  // Step 2: save remaining fields under the (possibly new) name
+  const r=await fetch(API(cfg().api+'/'+encodeURIComponent(effectiveName)),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rarity,base_points:pts,upgrade_cost:cost,source})});
   const d=await r.json();
   if(!r.ok){toast(d.error||'Error saving.','err');return;}
-  toast(cfg().updatedMsg(name));await load();
+  if(!nameChanged) toast(cfg().updatedMsg(effectiveName));
+  await load();
 }
 
 function startDelete(btn){

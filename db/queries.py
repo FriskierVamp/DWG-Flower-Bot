@@ -160,6 +160,43 @@ def upsert_flower(name: str, rarity: str, base_points: int,
         )
 
 
+def rename_flower(old_name: str, new_name: str) -> dict:
+    """Rename a flower in the master list.
+
+    Because player_flowers.flower_name has ON UPDATE CASCADE, all player
+    records that reference the old name are automatically repointed to the
+    new name by SQLite — no manual backfill required.
+
+    Returns a dict with keys:
+        ok      – True on success
+        error   – human-readable reason string on failure (key absent on success)
+        updated – number of player_flowers rows that were cascade-updated
+    """
+    old_name = old_name.strip()
+    new_name = new_name.strip()
+    if not new_name:
+        return {"ok": False, "error": "New name cannot be blank."}
+    if old_name.lower() == new_name.lower():
+        return {"ok": True, "updated": 0}   # nothing to do
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT name FROM flowers WHERE LOWER(name) = LOWER(?)", (new_name,)
+        ).fetchone()
+        if existing:
+            return {"ok": False, "error": f'A flower named "{existing["name"]}" already exists.'}
+        cur = conn.execute(
+            "UPDATE flowers SET name = ?, updated_at = datetime('now') WHERE LOWER(name) = LOWER(?)",
+            (new_name, old_name),
+        )
+        if cur.rowcount == 0:
+            return {"ok": False, "error": f'Flower "{old_name}" not found.'}
+        # Count how many player rows were cascade-updated
+        updated = conn.execute(
+            "SELECT COUNT(*) AS c FROM player_flowers WHERE flower_name = ?", (new_name,)
+        ).fetchone()["c"]
+    return {"ok": True, "updated": updated}
+
+
 def delete_flower(name: str) -> bool:
     with get_db() as conn:
         cur = conn.execute("DELETE FROM flowers WHERE LOWER(name) = LOWER(?)", (name.strip(),))
@@ -348,6 +385,43 @@ def upsert_master_vase(name: str, rarity: str, base_points: int,
                    updated_at   = datetime('now')""",
             (name.strip(), rarity, base_points, upgrade_cost, source.strip()),
         )
+
+
+def rename_vase(old_name: str, new_name: str) -> dict:
+    """Rename a vase in the master list.
+
+    Because player_vases.vase_name has ON UPDATE CASCADE, all player records
+    that reference the old name are automatically repointed to the new name
+    by SQLite — no manual backfill required.
+
+    Returns a dict with keys:
+        ok      – True on success
+        error   – human-readable reason string on failure (key absent on success)
+        updated – number of player_vases rows that were cascade-updated
+    """
+    old_name = old_name.strip()
+    new_name = new_name.strip()
+    if not new_name:
+        return {"ok": False, "error": "New name cannot be blank."}
+    if old_name.lower() == new_name.lower():
+        return {"ok": True, "updated": 0}   # nothing to do
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT name FROM master_vases WHERE LOWER(name) = LOWER(?)", (new_name,)
+        ).fetchone()
+        if existing:
+            return {"ok": False, "error": f'A vase named "{existing["name"]}" already exists.'}
+        cur = conn.execute(
+            "UPDATE master_vases SET name = ?, updated_at = datetime('now') WHERE LOWER(name) = LOWER(?)",
+            (new_name, old_name),
+        )
+        if cur.rowcount == 0:
+            return {"ok": False, "error": f'Vase "{old_name}" not found.'}
+        # Count how many player rows were cascade-updated
+        updated = conn.execute(
+            "SELECT COUNT(*) AS c FROM player_vases WHERE vase_name = ?", (new_name,)
+        ).fetchone()["c"]
+    return {"ok": True, "updated": updated}
 
 
 def delete_vase(name: str) -> bool:
